@@ -34,7 +34,7 @@ _install_hint() {
 _is_mountpoint() {
   local mnt="$1"
   if [[ "$RT_OS" == "Darwin" ]]; then
-    mount | grep -q " on ${mnt} " 2>/dev/null
+    mount | grep -qF " on ${mnt} " 2>/dev/null
   else
     mountpoint -q "$mnt" 2>/dev/null
   fi
@@ -447,7 +447,7 @@ _logs_list() {
     if ! echo "$running" | grep -qx "$s"; then
       local exit_code
       exit_code=$(_ssh \
-        "tail -1 ~/.rt_logs/${s}.log 2>/dev/null | sed -n 's/.*EXIT_CODE=\([0-9]*\).*/\1/p'" 2>/dev/null) || exit_code="?"
+        "tail -1 ~/.rt_logs/${s}.log 2>/dev/null | sed -n 's/.*EXIT_CODE=\([0-9][0-9]*\).*/\1/p'" 2>/dev/null) || exit_code="?"
       if [[ "$exit_code" == "0" ]]; then
         printf '  %-40s  [DONE]\n' "$s"
       else
