@@ -39,6 +39,8 @@ After installing, just tell CC your server info:
 
 CC handles everything: create config → push SSH key → connect → edit the file.
 
+On first connection, CC copies your local SSH public key (`~/.ssh/id_ed25519.pub` or `~/.ssh/id_rsa.pub`) to the remote server's `~/.ssh/authorized_keys` using the password you provide. After that, all connections are passwordless. The password is only used once and is not stored.
+
 **Multiple servers:** Give each server a name, CC manages them as profiles.
 
 > **You:** Connect to this GPU server, call it gpu1: root@10.0.0.5 port 22, password xxx, working directory /root/workspace
