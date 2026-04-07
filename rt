@@ -383,9 +383,15 @@ _logs_list() {
   printf '\n'
 
   # Get running tmux sessions
-  local running
+  local running ssh_err
   running=$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
-    "tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^${RT_SESSION_PREFIX}'" 2>/dev/null) || true
+    "tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^${RT_SESSION_PREFIX}'" 2>&1) || {
+    if [[ "$running" == *"Connection"* || "$running" == *"resolve"* || "$running" == *"No route"* ]]; then
+      warn "Cannot reach $REMOTE_HOST"
+      return 1
+    fi
+    running=""
+  }
 
   # Get all log files
   local logs

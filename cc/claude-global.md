@@ -3,6 +3,7 @@
 
 The `rt` command is available globally for managing remote servers via SSHFS + SSH.
 
+- First-time: `rt setup-key --password 'pass'` (one-time SSH key push)
 - Connect: `rt connect` / `rt -p <profile> connect`
 - Remote files: `~/remote/` (default) or `~/remote/<profile>/`
 - Run commands: `rt exec "cmd"` / `rt exec --bg --name NAME "long cmd"`

@@ -48,7 +48,7 @@ info "Symlinked: $BIN_DIR/rt → $SCRIPT_DIR/rt"
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
   # Add to .bashrc
   SHELL_RC="$HOME/.bashrc"
-  [[ -n "${ZSH_VERSION:-}" ]] && SHELL_RC="$HOME/.zshrc"
+  [[ "$(basename "$SHELL")" == "zsh" ]] && SHELL_RC="$HOME/.zshrc"
   if ! grep -q 'export PATH="$HOME/.local/bin' "$SHELL_RC" 2>/dev/null; then
     printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$SHELL_RC"
     warn "$BIN_DIR not in PATH. Added to $SHELL_RC."
@@ -67,9 +67,14 @@ RT_SECTION=$(cat "$SCRIPT_DIR/cc/claude-global.md")
 
 if [[ -f "$CLAUDE_DIR/CLAUDE.md" ]]; then
   if grep -q "$MARKER_START" "$CLAUDE_DIR/CLAUDE.md"; then
-    sed -i "/$MARKER_START/,/$MARKER_END/d" "$CLAUDE_DIR/CLAUDE.md"
+    # Atomic update: build new file in temp, then replace
+    tmpfile=$(mktemp)
+    sed "/$MARKER_START/,/$MARKER_END/d" "$CLAUDE_DIR/CLAUDE.md" > "$tmpfile"
+    printf '\n%s\n' "$RT_SECTION" >> "$tmpfile"
+    mv "$tmpfile" "$CLAUDE_DIR/CLAUDE.md"
+  else
+    printf '\n%s\n' "$RT_SECTION" >> "$CLAUDE_DIR/CLAUDE.md"
   fi
-  printf '\n%s\n' "$RT_SECTION" >> "$CLAUDE_DIR/CLAUDE.md"
   info "Updated $CLAUDE_DIR/CLAUDE.md (remote-toolkit section)"
 else
   printf '%s\n' "$RT_SECTION" > "$CLAUDE_DIR/CLAUDE.md"

@@ -25,7 +25,7 @@ rt check
 
 ### 2. Create config file
 
-Use the Write tool to create a config. Default profile uses `rt.conf`, named profiles use `rt.conf.<name>`.
+Use the Write tool to create a config at `~/.config/remote-toolkit/`. Default profile uses `rt.conf`, named profiles use `rt.conf.<name>` (e.g., `rt.conf.gpu1`).
 
 Default profile (single server):
 ```

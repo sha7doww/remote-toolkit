@@ -27,6 +27,7 @@ cd ~/Project/remote-toolkit
 
 `install.sh` does the following:
 - Symlinks `~/.local/bin/rt` → makes the `rt` command available globally
+- Adds `~/.local/bin` to PATH in `~/.bashrc` (or `~/.zshrc`) if not already present
 - Creates config directory `~/.config/remote-toolkit/`, migrates existing configs
 - Writes to `~/.claude/CLAUDE.md` → CC automatically knows about `rt` in any workspace
 - Writes to `~/.claude/commands/remote.md` → type `/remote` for CC to get the full guide
