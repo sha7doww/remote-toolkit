@@ -123,27 +123,22 @@ cmd_check() {
 cmd_init() {
   mkdir -p "$RT_HOME"
 
-  local has_config=false
-  for f in "$RT_HOME"/rt.conf "$RT_HOME"/rt.conf.*; do
-    [[ -f "$f" ]] && has_config=true && break
-  done
-
-  if [[ "$has_config" == false ]]; then
+  if [[ -f "$RT_CONF" ]]; then
+    info "Config already exists: $RT_CONF"
+  else
     if [[ -f "$RT_SCRIPT_DIR/rt.conf.example" ]]; then
-      cp "$RT_SCRIPT_DIR/rt.conf.example" "$RT_HOME/rt.conf"
-      info "Created $RT_HOME/rt.conf from template."
+      cp "$RT_SCRIPT_DIR/rt.conf.example" "$RT_CONF"
+      info "Created $RT_CONF from template."
     else
-      cat > "$RT_HOME/rt.conf" <<'TMPL'
+      cat > "$RT_CONF" <<'TMPL'
 REMOTE_HOST="user@example.com"
 REMOTE_DIR="/home/user/project"
 # SSH_PORT=22
 # SSH_KEY="$HOME/.ssh/id_ed25519"
 TMPL
-      info "Created $RT_HOME/rt.conf with defaults."
+      info "Created $RT_CONF with defaults."
     fi
-    info "Edit $RT_HOME/rt.conf with your server details."
-  else
-    info "Config already exists in $RT_HOME/"
+    info "Edit $RT_CONF with your server details."
   fi
 
   info "Config directory: $RT_HOME"
