@@ -1,172 +1,90 @@
 # Remote Toolkit
 
-让本地 Claude Code 通过 SSHFS + SSH 操控远程服务器的轻量 Bash 工具包。支持多 profile 同时连接多台服务器。
-
-## 安装
-
-```bash
-git clone <repo-url> ~/Project/remote-toolkit
-cd ~/Project/remote-toolkit
-./install.sh
-```
-
-安装后：
-- `rt` 命令全局可用（symlink 到 `~/.local/bin/rt`）
-- 配置目录：`~/.config/remote-toolkit/`
-- Claude Code 集成：全局 `CLAUDE.md` + `/remote` 斜杠命令
+让 Claude Code 在任意工作目录操控远程服务器。支持同时连接多台服务器。
 
 ## 原理
+
+通过 SSHFS 把远程目录挂载到本地，CC 用 Read/Edit/Write 直接操作远程文件；通过 SSH 执行远程命令，长任务用 tmux 保活。
 
 ```
 本地 Claude Code
   ├── Read/Edit/Write  →  ~/remote/       ← SSHFS →  服务器A:/project
   ├── Read/Edit/Write  →  ~/remote/gpu1/  ← SSHFS →  服务器B:/workspace
-  └── Bash: rt exec    →  SSH             →          远程 shell (+ tmux)
+  └── rt exec          →  SSH + tmux      →          远程 shell
 ```
 
-- 默认 profile 挂载到 `~/remote/`
-- 命名 profile 挂载到 `~/remote/<name>/`
+## 安装
 
-## 前置要求
-
-| 工具 | 用途 | 安装 |
-|------|------|------|
-| `ssh` | 远程连接 | `sudo apt install openssh-client` |
-| `sshfs` | 挂载远程文件系统 | `sudo apt install sshfs` |
-| `sshpass` | 非交互式推送 SSH 密钥 | `sudo apt install sshpass` |
-| `tmux` | 后台长任务 | `sudo apt install tmux` |
-
-一键安装：
 ```bash
+# 1. 安装系统依赖（CC 无法 sudo，需要你手动执行）
 sudo apt install -y sshfs sshpass tmux
-```
 
-> **注意：** Claude Code 无法执行 `sudo`。如果 CC 提示依赖缺失，需要你手动安装。
-
-## 快速开始
-
-```bash
-# 1. 安装（一次性）
+# 2. 克隆并安装
+git clone <repo-url> ~/Project/remote-toolkit
+cd ~/Project/remote-toolkit
 ./install.sh
-
-# 2. 编辑配置
-vim ~/.config/remote-toolkit/rt.conf    # 填入 REMOTE_HOST 和 REMOTE_DIR
-
-# 3. 推送 SSH 密钥（一次性，之后免密）
-rt setup-key --password '你的密码'
-
-# 4. 连接
-rt connect
-
-# 5. 操作远程文件
-ls ~/remote/
-
-# 6. 执行远程命令
-rt exec "whoami"
-
-# 7. 长任务（后台运行，断线不丢失）
-rt exec --bg --name build "make all"
-rt logs rt_default_bg_build
-
-# 8. 断开
-rt disconnect
 ```
 
-## 多服务器 (Profile)
+`install.sh` 做了以下事情：
+- 创建 symlink `~/.local/bin/rt` → 让 `rt` 命令全局可用
+- 创建配置目录 `~/.config/remote-toolkit/`，迁移已有配置
+- 写入 `~/.claude/CLAUDE.md` → CC 在任意工作区自动知道 `rt` 的存在
+- 写入 `~/.claude/commands/remote.md` → 输入 `/remote` 可让 CC 获取完整操作指南
 
-每个 profile 有独立的配置文件和挂载点，互不干扰。
+## 使用
 
-```bash
-# 创建 profile 配置
-cat > ~/.config/remote-toolkit/rt.conf.gpu1 << 'EOF'
-REMOTE_HOST="root@gpu-server-1"
-REMOTE_DIR="/root/workspace"
-SSH_PORT=22
-EOF
+安装后，直接告诉 CC 你的服务器信息即可：
 
-cat > ~/.config/remote-toolkit/rt.conf.gpu2 << 'EOF'
-REMOTE_HOST="root@gpu-server-2"
-REMOTE_DIR="/root/workspace"
-SSH_PORT=11720
-EOF
+> **你：** 帮我连上 root@192.168.1.100 端口 22，密码 xxx，改一下 /root/app/config.yaml
 
-# 分别推送密钥
-rt -p gpu1 setup-key --password 'pass1'
-rt -p gpu2 setup-key --password 'pass2'
+CC 会自动完成：创建配置 → 推送密钥 → 连接 → 编辑文件。
 
-# 同时连接两台
-rt -p gpu1 connect    # 挂载到 ~/remote/gpu1/
-rt -p gpu2 connect    # 挂载到 ~/remote/gpu2/
+**多台服务器：** 给服务器起个名字，CC 通过 profile 管理。
 
-# 分别操作
-rt -p gpu1 exec "nvidia-smi"
-rt -p gpu2 exec "nvidia-smi"
+> **你：** 帮我连上这台 GPU 服务器，叫 gpu1：root@10.0.0.5 端口 22，密码 xxx，工作目录 /root/workspace
 
-# 查看所有连接
-rt status --all
+之后就可以按名字操作：
 
-# 分别断开
-rt -p gpu1 disconnect
-rt -p gpu2 disconnect
-```
+> **你：** 在 gpu1 上跑 `python train.py --epochs 100`
 
-不带 `-p` 等同于 `-p default`，配置文件为 `~/.config/remote-toolkit/rt.conf`，挂载点为 `~/remote/`。
+> **你：** 断开 gpu1
 
-## 命令参考
+断开只是卸载挂载，配置文件保留，下次 `连上 gpu1` 即可重新连接。
 
-所有命令均可在前面加 `-p <profile>` 指定 profile。
+## 你可能需要手动做的事
 
-| 命令 | 说明 |
+| 场景 | 操作 |
 |------|------|
-| `rt check` | 检查依赖是否齐全 |
-| `rt setup-key [--password PASS]` | 推送 SSH 密钥到远程 |
-| `rt connect` | 挂载远程目录 |
-| `rt disconnect` | 卸载并清理 |
-| `rt exec "cmd"` | 同步执行远程命令 |
-| `rt exec --bg "cmd"` | 后台执行（tmux） |
-| `rt exec --bg --name NAME "cmd"` | 指定名称的后台任务 |
-| `rt logs` | 列出后台任务 |
-| `rt logs JOB_ID` | 查看任务输出 |
-| `rt logs JOB_ID -f` | 实时跟踪输出 |
-| `rt status` | 当前 profile 连接状态 |
-| `rt status --all` | 所有 profile 连接状态 |
-| `rt help` | 帮助信息 |
+| CC 提示依赖缺失 | `sudo apt install -y sshfs sshpass tmux` |
+| 首次连接新服务器 | 告诉 CC 服务器地址、端口、密码 |
+| 挂载异常 | 告诉 CC 重连，或手动 `rt disconnect && rt connect` |
 
-## 配置文件
+其余操作（配置文件创建、SSH 密钥推送、文件编辑、命令执行、后台任务管理）全部由 CC 通过 `rt` 命令完成。
 
-配置目录：`~/.config/remote-toolkit/`（可通过 `RT_HOME` 环境变量覆盖）
+## 配置
 
-- 默认 profile：`rt.conf`
-- 命名 profile：`rt.conf.<name>`（如 `rt.conf.gpu1`）
+配置目录：`~/.config/remote-toolkit/`
 
-| 变量 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `REMOTE_HOST` | 是 | — | user@hostname 或 SSH config 别名 |
-| `REMOTE_DIR` | 是 | — | 要挂载的远程目录 |
-| `LOCAL_MOUNT` | 否 | `~/remote` 或 `~/remote/<profile>` | 本地挂载点 |
-| `SSH_KEY` | 否 | SSH agent | SSH 密钥路径 |
-| `SSH_PORT` | 否 | `22` | SSH 端口 |
+每台服务器一个配置文件：
 
-## 与 Claude Code 配合使用
+| 文件 | 用途 | 挂载点 |
+|------|------|--------|
+| `rt.conf` | 默认服务器 | `~/remote/` |
+| `rt.conf.gpu1` | 命名 profile | `~/remote/gpu1/` |
+| `rt.conf.gpu2` | 命名 profile | `~/remote/gpu2/` |
 
-运行 `./install.sh` 后，CC 在**任意工作目录**都能使用 `rt`：
-- 全局 `~/.claude/CLAUDE.md` 让 CC 自动知道 `rt` 的存在和基本用法
-- 输入 `/remote` 可注入完整的操作指南（首次连接、排障等）
-- CC 可以：创建配置、推送密钥、连接、读写远程文件、执行远程命令
-- CC 不能：安装系统依赖（需要你手动 `sudo apt install`）
-
-典型对话：
-> 用户：帮我连上 root@192.168.1.100，密码是 xxx，改一下 /root/app/config.yaml
->
-> CC：创建配置 → setup-key → connect → 通过 ~/remote/ 直接编辑文件
+配置内容（通常由 CC 自动创建）：
+```bash
+REMOTE_HOST="root@192.168.1.100"   # 必填
+REMOTE_DIR="/root/workspace"        # 必填
+SSH_PORT=22                         # 可选，默认 22
+```
 
 ## 故障排查
 
 | 问题 | 解决 |
 |------|------|
-| `sshfs: command not found` | `sudo apt install sshfs` |
-| `sshpass: command not found` | `sudo apt install sshpass` |
-| SSH 连接失败 | 检查网络和密钥：`ssh -p PORT user@host "echo ok"` |
-| 挂载后文件操作超时 | `rt disconnect && rt connect` 重连 |
-| 卸载失败 (device busy) | 关闭所有访问挂载点的进程后重试 |
-| 后台任务无输出 | 确认远程已装 tmux：`ssh user@host "tmux -V"` |
+| CC 说 `sshfs: command not found` | `sudo apt install sshfs` |
+| SSH 连接失败 | 检查网络：`ssh -p PORT user@host "echo ok"` |
+| 文件操作超时/卡住 | 告诉 CC 重连，或 `rt disconnect && rt connect` |
+| 卸载失败 (device busy) | 关闭所有访问 `~/remote/` 的进程后重试 |
