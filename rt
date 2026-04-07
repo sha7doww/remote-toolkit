@@ -1,0 +1,563 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── Paths (defaults, may be overridden by profile) ────────────────
+RT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RT_PROFILE="default"
+RT_CONF=""
+RT_STATE_DIR=""
+RT_SESSION_PREFIX=""
+
+# ── Colors & output helpers ────────────────────────────────────────
+_color() { [[ -t 2 ]] && printf '\e[%sm' "$1" >&2 || true; }
+_reset() { _color 0; }
+info()  { _color 32; printf ':: %s\n' "$*" >&2; _reset; }
+warn()  { _color 33; printf '!! %s\n' "$*" >&2; _reset; }
+die()   { _color 31; printf 'ERROR: %s\n' "$*" >&2; _reset; exit 1; }
+
+# ── Profile-aware paths ───────────────────────────────────────────
+_init_profile() {
+  if [[ "$RT_PROFILE" == "default" ]]; then
+    RT_CONF="${RT_DIR}/rt.conf"
+  else
+    RT_CONF="${RT_DIR}/rt.conf.${RT_PROFILE}"
+  fi
+  RT_STATE_DIR="${RT_DIR}/.rt/${RT_PROFILE}"
+  RT_SESSION_PREFIX="rt_${RT_PROFILE}_bg_"
+}
+
+# ── Config ─────────────────────────────────────────────────────────
+load_config() {
+  [[ -f "$RT_CONF" ]] || die "Config not found: $RT_CONF
+  Create it: cp rt.conf.example ${RT_CONF##*/}"
+  # shellcheck source=/dev/null
+  . "$RT_CONF"
+  [[ -n "${REMOTE_HOST:-}" ]] || die "REMOTE_HOST not set in $RT_CONF"
+  [[ -n "${REMOTE_DIR:-}" ]]  || die "REMOTE_DIR not set in $RT_CONF"
+
+  # Default mount point: ~/remote for default profile, ~/remote/<name> for named
+  if [[ "$RT_PROFILE" == "default" ]]; then
+    LOCAL_MOUNT="${LOCAL_MOUNT:-$HOME/remote}"
+  else
+    LOCAL_MOUNT="${LOCAL_MOUNT:-$HOME/remote/${RT_PROFILE}}"
+  fi
+  SSH_PORT="${SSH_PORT:-22}"
+  SSH_KEY="${SSH_KEY:-}"
+
+  # Build shared SSH options array
+  SSH_OPTS=(
+    -o ConnectTimeout=10
+    -o BatchMode=yes
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=3
+    -p "$SSH_PORT"
+  )
+  if [[ -n "$SSH_KEY" ]]; then SSH_OPTS+=(-i "$SSH_KEY"); fi
+}
+
+# ── State helpers ──────────────────────────────────────────────────
+save_state() {
+  mkdir -p "$RT_STATE_DIR"
+  printf '%s' "$REMOTE_HOST"  > "$RT_STATE_DIR/host"
+  printf '%s' "$LOCAL_MOUNT"  > "$RT_STATE_DIR/mount"
+  printf '%s' "$REMOTE_DIR"   > "$RT_STATE_DIR/remote_dir"
+  printf '%s' "$RT_PROFILE"   > "$RT_STATE_DIR/profile"
+}
+
+clear_state() {
+  rm -rf "$RT_STATE_DIR"
+}
+
+is_mounted() {
+  [[ -n "${LOCAL_MOUNT:-}" ]] && mountpoint -q "$LOCAL_MOUNT" 2>/dev/null
+}
+
+# ── Subcommands ────────────────────────────────────────────────────
+
+cmd_check() {
+  local ok=true
+  printf 'Checking dependencies ...\n\n'
+
+  for cmd in ssh tmux; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+      info "$cmd — OK ($(command -v "$cmd"))"
+    else
+      warn "$cmd — MISSING"
+      printf '  Install: sudo apt install %s\n' "$cmd"
+      ok=false
+    fi
+  done
+
+  if command -v sshfs >/dev/null 2>&1; then
+    info "sshfs — OK ($(command -v sshfs))"
+  else
+    warn "sshfs — MISSING"
+    printf '  Install: sudo apt install sshfs\n'
+    ok=false
+  fi
+
+  if command -v sshpass >/dev/null 2>&1; then
+    info "sshpass — OK ($(command -v sshpass))"
+  else
+    warn "sshpass — MISSING (needed for rt setup-key --password)"
+    printf '  Install: sudo apt install sshpass\n'
+    ok=false
+  fi
+
+  if command -v fusermount3 >/dev/null 2>&1 || command -v fusermount >/dev/null 2>&1; then
+    info "fusermount — OK"
+  else
+    warn "fusermount — MISSING (usually comes with sshfs/fuse3)"
+    ok=false
+  fi
+
+  printf '\n'
+  if [[ "$ok" == true ]]; then
+    info "All dependencies satisfied."
+  else
+    warn "Some dependencies are missing. Ask the user to run the install commands above."
+  fi
+  $ok
+}
+
+cmd_setup_key() {
+  load_config
+
+  # Parse flags
+  local password=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --password)   password="$2"; shift 2 ;;
+      --password=*) password="${1#--password=}"; shift ;;
+      *)            die "Usage: rt setup-key [--password PASSWORD]" ;;
+    esac
+  done
+
+  # Determine which key to copy
+  local key_file="${SSH_KEY:-}"
+  if [[ -z "$key_file" ]]; then
+    for k in "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_rsa"; do
+      if [[ -f "$k" ]]; then key_file="$k"; break; fi
+    done
+  fi
+  [[ -n "$key_file" && -f "$key_file" ]] || die "No SSH key found. Generate one: ssh-keygen -t ed25519"
+  [[ -f "${key_file}.pub" ]] || die "Public key not found: ${key_file}.pub"
+
+  info "[$RT_PROFILE] Copying ${key_file}.pub → $REMOTE_HOST (port $SSH_PORT)"
+
+  if [[ -n "$password" ]]; then
+    # Non-interactive: use sshpass
+    command -v sshpass >/dev/null 2>&1 \
+      || die "sshpass not found. Ask the user to install: sudo apt install sshpass"
+    SSHPASS="$password" sshpass -e ssh-copy-id \
+      -o StrictHostKeyChecking=accept-new \
+      -i "$key_file" -p "$SSH_PORT" "$REMOTE_HOST"
+  else
+    # Interactive: prompt for password
+    info "You will be prompted for the remote password (one time only)."
+    ssh-copy-id -i "$key_file" -p "$SSH_PORT" "$REMOTE_HOST"
+  fi
+
+  # Verify key auth works
+  info "Verifying key authentication ..."
+  if ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "echo ok" >/dev/null 2>&1; then
+    info "Key auth works! You can now use: rt connect"
+  else
+    die "Key was copied but verification failed. Check server sshd_config."
+  fi
+}
+
+cmd_connect() {
+  load_config
+
+  # Idempotent: already mounted → just report
+  if is_mounted; then
+    info "[$RT_PROFILE] Already connected to $REMOTE_HOST"
+    cmd_status
+    return 0
+  fi
+
+  # Check sshfs is available
+  command -v sshfs >/dev/null 2>&1 \
+    || die "sshfs not found. Ask the user to install: sudo apt install sshfs"
+
+  # Test SSH connectivity
+  info "[$RT_PROFILE] Testing SSH connection to $REMOTE_HOST ..."
+  if ! ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "echo ok" >/dev/null 2>&1; then
+    die "Cannot reach $REMOTE_HOST via SSH. If using password auth, run 'rt setup-key' first."
+  fi
+
+  # Verify remote directory exists
+  if ! ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "test -d '$REMOTE_DIR'"; then
+    die "Remote directory does not exist: $REMOTE_DIR"
+  fi
+
+  # Create local mount point
+  mkdir -p "$LOCAL_MOUNT"
+
+  # Mount via SSHFS
+  info "[$RT_PROFILE] Mounting $REMOTE_HOST:$REMOTE_DIR → $LOCAL_MOUNT ..."
+  local sshfs_opts=(
+    -o "Port=${SSH_PORT}"
+    -o reconnect
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=3
+    -o cache=yes
+    -o cache_timeout=5
+    -o attr_timeout=5
+    -o entry_timeout=5
+    -o auto_cache
+    -o no_readahead
+  )
+  if [[ -n "$SSH_KEY" ]]; then sshfs_opts+=(-o "IdentityFile=${SSH_KEY}"); fi
+
+  if ! sshfs "${REMOTE_HOST}:${REMOTE_DIR}" "$LOCAL_MOUNT" "${sshfs_opts[@]}"; then
+    die "SSHFS mount failed. Check connection and permissions."
+  fi
+
+  # Verify
+  if ! is_mounted; then
+    die "Mount point not active after sshfs. Something went wrong."
+  fi
+
+  save_state
+  info "[$RT_PROFILE] Connected!"
+  info "  Remote:  $REMOTE_HOST:$REMOTE_DIR"
+  info "  Local:   $LOCAL_MOUNT"
+}
+
+cmd_disconnect() {
+  load_config
+
+  if ! is_mounted; then
+    info "[$RT_PROFILE] Not connected."
+    clear_state
+    return 0
+  fi
+
+  # Best-effort: kill remote background sessions for this profile
+  info "[$RT_PROFILE] Cleaning up remote background jobs ..."
+  ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+    "tmux list-sessions -F '#{session_name}' 2>/dev/null \
+     | grep '^${RT_SESSION_PREFIX}' \
+     | xargs -I{} tmux kill-session -t {} 2>/dev/null" \
+    2>/dev/null || true
+
+  # Unmount
+  info "[$RT_PROFILE] Unmounting $LOCAL_MOUNT ..."
+  if ! fusermount3 -u "$LOCAL_MOUNT" 2>/dev/null && ! fusermount -u "$LOCAL_MOUNT" 2>/dev/null; then
+    warn "Normal unmount failed, trying lazy unmount ..."
+    if ! fusermount3 -uz "$LOCAL_MOUNT" 2>/dev/null && ! fusermount -uz "$LOCAL_MOUNT" 2>/dev/null; then
+      die "Cannot unmount $LOCAL_MOUNT. Close any open files and try again."
+    fi
+    warn "Lazy unmount scheduled. Mount will be removed when all files are closed."
+  fi
+
+  clear_state
+  rmdir "$LOCAL_MOUNT" 2>/dev/null || true
+  info "[$RT_PROFILE] Disconnected."
+}
+
+cmd_exec() {
+  load_config
+
+  if ! is_mounted; then
+    die "[$RT_PROFILE] Not connected. Run 'rt connect' first."
+  fi
+
+  # Parse flags
+  local bg=false
+  local name=""
+  local cmd_args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --bg)     bg=true; shift ;;
+      --name)   name="$2"; shift 2 ;;
+      --name=*) name="${1#--name=}"; shift ;;
+      --)       shift; cmd_args+=("$@"); break ;;
+      -*)       die "Unknown flag: $1" ;;
+      *)        cmd_args+=("$@"); break ;;
+    esac
+  done
+
+  [[ ${#cmd_args[@]} -gt 0 ]] || die "Usage: rt exec [--bg] [--name NAME] <command>"
+  local command="${cmd_args[*]}"
+
+  if [[ "$bg" == true ]]; then
+    _exec_bg "$command" "$name"
+  else
+    _exec_sync "$command"
+  fi
+}
+
+_exec_sync() {
+  local command="$1"
+  ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "cd '${REMOTE_DIR}' && ${command}"
+}
+
+_exec_bg() {
+  local command="$1"
+  local name="$2"
+
+  # Check remote tmux
+  if ! ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "command -v tmux" >/dev/null 2>&1; then
+    die "tmux not found on remote server. Install tmux on $REMOTE_HOST for background execution."
+  fi
+
+  # Generate session name
+  local session
+  if [[ -n "$name" ]]; then
+    session="${RT_SESSION_PREFIX}${name}"
+  else
+    session="${RT_SESSION_PREFIX}$(date +%s)_$$"
+  fi
+
+  # Create remote log directory
+  ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "mkdir -p ~/.rt_logs"
+
+  # Start tmux session on remote
+  local log_file="~/.rt_logs/${session}.log"
+  ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+    "tmux new-session -d -s '${session}' -x 200 -y 50 \
+      \"cd '${REMOTE_DIR}' && { ${command}; } 2>&1 | tee ${log_file}; echo \\\"EXIT_CODE=\\\$?\\\" >> ${log_file}\""
+
+  info "[$RT_PROFILE] Background job started: $session"
+  info "  Check output: rt -p $RT_PROFILE logs $session"
+}
+
+cmd_logs() {
+  load_config
+
+  if ! is_mounted; then
+    die "[$RT_PROFILE] Not connected. Run 'rt connect' first."
+  fi
+
+  local job_id="${1:-}"
+  local follow=false
+  [[ "${2:-}" == "--follow" || "${2:-}" == "-f" ]] && follow=true
+
+  if [[ -z "$job_id" ]]; then
+    _logs_list
+  elif [[ "$follow" == true ]]; then
+    ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "tail -f ~/.rt_logs/${job_id}.log" 2>/dev/null \
+      || die "Log not found: $job_id"
+  else
+    _logs_show "$job_id"
+  fi
+}
+
+_logs_list() {
+  info "[$RT_PROFILE] Background jobs on $REMOTE_HOST:"
+  printf '\n'
+
+  # Get running tmux sessions
+  local running
+  running=$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+    "tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^${RT_SESSION_PREFIX}'" 2>/dev/null) || true
+
+  # Get all log files
+  local logs
+  logs=$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+    "ls -1 ~/.rt_logs/${RT_SESSION_PREFIX}*.log 2>/dev/null | xargs -I{} basename {} .log" 2>/dev/null) || true
+
+  if [[ -z "$running" && -z "$logs" ]]; then
+    printf '  (none)\n'
+    return 0
+  fi
+
+  # Print running sessions
+  while IFS= read -r s; do
+    [[ -n "$s" ]] && printf '  %-40s  [RUNNING]\n' "$s"
+  done <<< "$running"
+
+  # Print finished (has log but no tmux session)
+  while IFS= read -r s; do
+    [[ -n "$s" ]] || continue
+    if ! echo "$running" | grep -qx "$s"; then
+      local exit_code
+      exit_code=$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+        "tail -1 ~/.rt_logs/${s}.log 2>/dev/null | grep -oP 'EXIT_CODE=\K[0-9]+'" 2>/dev/null) || exit_code="?"
+      if [[ "$exit_code" == "0" ]]; then
+        printf '  %-40s  [DONE]\n' "$s"
+      else
+        printf '  %-40s  [EXITED: %s]\n' "$s" "$exit_code"
+      fi
+    fi
+  done <<< "$logs"
+}
+
+_logs_show() {
+  local job_id="$1"
+  ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "cat ~/.rt_logs/${job_id}.log" 2>/dev/null \
+    || die "Log not found: $job_id"
+}
+
+cmd_status() {
+  # If --all flag, show all profiles
+  if [[ "${1:-}" == "--all" || "${1:-}" == "-a" ]]; then
+    _status_all
+    return
+  fi
+
+  load_config
+
+  printf '\n'
+  if is_mounted; then
+    local host="${REMOTE_HOST}"
+    local rdir="${REMOTE_DIR}"
+    local mount="${LOCAL_MOUNT}"
+
+    [[ -f "$RT_STATE_DIR/host" ]]       && host=$(cat "$RT_STATE_DIR/host")
+    [[ -f "$RT_STATE_DIR/remote_dir" ]] && rdir=$(cat "$RT_STATE_DIR/remote_dir")
+    [[ -f "$RT_STATE_DIR/mount" ]]      && mount=$(cat "$RT_STATE_DIR/mount")
+
+    local ssh_ok="reachable"
+    ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "echo ok" >/dev/null 2>&1 || ssh_ok="UNREACHABLE"
+
+    local bg_running=0
+    bg_running=$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+      "tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^${RT_SESSION_PREFIX}'" 2>/dev/null) || bg_running=0
+
+    printf '  Profile:     %s\n' "$RT_PROFILE"
+    printf '  Status:      connected\n'
+    printf '  Remote host: %s\n' "$host"
+    printf '  Remote dir:  %s\n' "$rdir"
+    printf '  Mount point: %s\n' "$mount"
+    printf '  SSH:         %s\n' "$ssh_ok"
+    if [[ $bg_running -gt 0 ]]; then printf '  Background:  %d running\n' "$bg_running"; fi
+  else
+    printf '  Profile:     %s\n' "$RT_PROFILE"
+    printf '  Status:      disconnected\n'
+  fi
+  printf '\n'
+}
+
+_status_all() {
+  local found=false
+  local state_base="${RT_DIR}/.rt"
+
+  printf '\n'
+  if [[ -d "$state_base" ]]; then
+    for pdir in "$state_base"/*/; do
+      [[ -d "$pdir" ]] || continue
+      found=true
+      local pname
+      pname=$(basename "$pdir")
+      local host="" mount="" rdir=""
+      [[ -f "$pdir/host" ]]       && host=$(cat "$pdir/host")
+      [[ -f "$pdir/mount" ]]      && mount=$(cat "$pdir/mount")
+      [[ -f "$pdir/remote_dir" ]] && rdir=$(cat "$pdir/remote_dir")
+
+      local status="disconnected"
+      if [[ -n "$mount" ]] && mountpoint -q "$mount" 2>/dev/null; then
+        status="connected"
+      fi
+
+      printf '  [%s] %s — %s:%s → %s\n' "$pname" "$status" "$host" "$rdir" "$mount"
+    done
+  fi
+
+  if [[ "$found" == false ]]; then
+    printf '  No profiles connected.\n'
+  fi
+  printf '\n'
+}
+
+cmd_help() {
+  cat <<'HELP'
+Remote Toolkit — Control remote servers from Claude Code
+
+USAGE:
+  rt [--profile NAME] <command> [options]
+  rt [-p NAME] <command> [options]
+
+GLOBAL FLAGS:
+  -p, --profile NAME   Select a profile (default: "default")
+                        Config file: rt.conf (default) or rt.conf.<NAME>
+                        Mount point: ~/remote (default) or ~/remote/<NAME>
+
+COMMANDS:
+  check                Check local dependencies, report what's missing
+  setup-key            Copy SSH key to remote (one-time)
+  setup-key --password PASS
+                       Non-interactive key push (requires sshpass)
+  connect              Mount remote directory via SSHFS
+  disconnect           Unmount and clean up
+  exec <command>       Run a command on the remote server
+  exec --bg <command>  Run in background (tmux), survives disconnection
+  exec --bg --name <n> <command>
+                       Background with a custom job name
+  logs                 List all background jobs for this profile
+  logs <job_id>        Show output of a background job
+  logs <job_id> -f     Follow (tail -f) a background job's output
+  status               Show connection status for current profile
+  status --all         Show all profiles
+  help                 Show this help
+
+EXAMPLES:
+  # Single server (default profile)
+  rt setup-key --password 'mypass'
+  rt connect
+  rt exec "ls -la"
+  rt disconnect
+
+  # Multiple servers with profiles
+  rt -p gpu1 setup-key --password 'pass1'
+  rt -p gpu1 connect
+  rt -p gpu1 exec "nvidia-smi"
+
+  rt -p gpu2 setup-key --password 'pass2'
+  rt -p gpu2 connect
+  rt -p gpu2 exec "nvidia-smi"
+
+  rt status --all          # See all connections
+
+  rt -p gpu1 disconnect    # Disconnect one
+  rt -p gpu2 disconnect
+
+CONFIG FILES:
+  rt.conf            Default profile config
+  rt.conf.<NAME>     Named profile config (e.g., rt.conf.gpu1)
+
+  Required variables:
+    REMOTE_HOST      user@hostname
+    REMOTE_DIR       /path/on/remote
+
+  Optional variables:
+    LOCAL_MOUNT      local mount point (auto: ~/remote or ~/remote/<NAME>)
+    SSH_KEY          path to SSH key (default: agent)
+    SSH_PORT         SSH port (default: 22)
+HELP
+}
+
+# ── Main dispatch ──────────────────────────────────────────────────
+main() {
+  # Parse global --profile / -p flag before subcommand
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -p|--profile) RT_PROFILE="$2"; shift 2 ;;
+      --profile=*)  RT_PROFILE="${1#--profile=}"; shift ;;
+      *)            break ;;
+    esac
+  done
+
+  _init_profile
+
+  local subcmd="${1:-help}"
+  shift || true
+
+  case "$subcmd" in
+    check)         cmd_check "$@" ;;
+    setup-key)     cmd_setup_key "$@" ;;
+    connect)       cmd_connect "$@" ;;
+    disconnect)    cmd_disconnect "$@" ;;
+    exec)          cmd_exec "$@" ;;
+    status)        cmd_status "$@" ;;
+    logs)          cmd_logs "$@" ;;
+    help|--help|-h) cmd_help ;;
+    *)             die "Unknown command: $subcmd. Run 'rt help' for usage." ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,18 @@
+# Remote Toolkit Configuration
+# Copy this file to rt.conf and edit:
+#   cp rt.conf.example rt.conf
+
+# REQUIRED: Remote host (user@hostname or SSH config alias)
+REMOTE_HOST="user@example.com"
+
+# REQUIRED: Remote directory to mount
+REMOTE_DIR="/home/user/project"
+
+# Optional: Local mount point (default: ~/remote)
+# LOCAL_MOUNT="$HOME/remote"
+
+# Optional: SSH key path (default: use SSH agent)
+# SSH_KEY="$HOME/.ssh/id_ed25519"
+
+# Optional: SSH port (default: 22)
+# SSH_PORT=22
