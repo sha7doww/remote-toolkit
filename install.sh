@@ -6,8 +6,10 @@ RT_HOME="${RT_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/remote-toolkit}"
 BIN_DIR="$HOME/.local/bin"
 CLAUDE_DIR="$HOME/.claude"
 
-info()  { printf '\e[32m:: %s\e[0m\n' "$*"; }
-warn()  { printf '\e[33m!! %s\e[0m\n' "$*"; }
+_color() { [[ -t 1 ]] && printf '\e[%sm' "$1" || true; }
+_reset() { _color 0; }
+info()  { _color 32; printf ':: %s\n' "$*"; _reset; }
+warn()  { _color 33; printf '!! %s\n' "$*"; _reset; }
 
 printf '\n  Remote Toolkit — Install\n\n'
 
