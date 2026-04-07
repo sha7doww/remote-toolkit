@@ -20,8 +20,8 @@ Local Claude Code
 sudo apt install -y sshfs sshpass tmux
 
 # 2. Clone and install
-git clone <repo-url> ~/Project/remote-toolkit
-cd ~/Project/remote-toolkit
+git clone <repo-url>
+cd remote-toolkit
 ./install.sh
 ```
 
