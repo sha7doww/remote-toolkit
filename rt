@@ -73,44 +73,43 @@ is_mounted() {
   [[ -n "${LOCAL_MOUNT:-}" ]] && mountpoint -q "$LOCAL_MOUNT" 2>/dev/null
 }
 
+_ssh() {
+  ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "$@"
+}
+
+_ssh_test() {
+  _ssh "echo ok" >/dev/null 2>&1
+}
+
 # ── Subcommands ────────────────────────────────────────────────────
 
 cmd_check() {
   local ok=true
   printf 'Checking dependencies ...\n\n'
 
-  for cmd in ssh tmux; do
+  # Format: command|package|missing_note|alt_command
+  local deps=(
+    "ssh|ssh||"
+    "tmux|tmux||"
+    "sshfs|sshfs||"
+    "sshpass|sshpass|needed for rt setup-key --password|"
+    "fusermount3||usually comes with sshfs/fuse3|fusermount"
+  )
+
+  for entry in "${deps[@]}"; do
+    IFS='|' read -r cmd pkg note alt <<< "$entry"
     if command -v "$cmd" >/dev/null 2>&1; then
       info "$cmd — OK ($(command -v "$cmd"))"
+    elif [[ -n "$alt" ]] && command -v "$alt" >/dev/null 2>&1; then
+      info "$cmd — OK ($(command -v "$alt"))"
     else
-      warn "$cmd — MISSING"
-      printf '  Install: sudo apt install %s\n' "$cmd"
+      local label="MISSING"
+      [[ -n "$note" ]] && label="MISSING ($note)"
+      warn "$cmd — $label"
+      [[ -n "$pkg" ]] && printf '  Install: sudo apt install %s\n' "$pkg"
       ok=false
     fi
   done
-
-  if command -v sshfs >/dev/null 2>&1; then
-    info "sshfs — OK ($(command -v sshfs))"
-  else
-    warn "sshfs — MISSING"
-    printf '  Install: sudo apt install sshfs\n'
-    ok=false
-  fi
-
-  if command -v sshpass >/dev/null 2>&1; then
-    info "sshpass — OK ($(command -v sshpass))"
-  else
-    warn "sshpass — MISSING (needed for rt setup-key --password)"
-    printf '  Install: sudo apt install sshpass\n'
-    ok=false
-  fi
-
-  if command -v fusermount3 >/dev/null 2>&1 || command -v fusermount >/dev/null 2>&1; then
-    info "fusermount — OK"
-  else
-    warn "fusermount — MISSING (usually comes with sshfs/fuse3)"
-    ok=false
-  fi
 
   printf '\n'
   if [[ "$ok" == true ]]; then
@@ -118,7 +117,7 @@ cmd_check() {
   else
     warn "Some dependencies are missing. Ask the user to run the install commands above."
   fi
-  $ok
+  [[ "$ok" == true ]]
 }
 
 cmd_init() {
@@ -191,7 +190,7 @@ cmd_setup_key() {
 
   # Verify key auth works
   info "Verifying key authentication ..."
-  if ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "echo ok" >/dev/null 2>&1; then
+  if _ssh_test; then
     info "Key auth works! You can now use: rt connect"
   else
     die "Key was copied but verification failed. Check server sshd_config."
@@ -214,12 +213,12 @@ cmd_connect() {
 
   # Test SSH connectivity
   info "[$RT_PROFILE] Testing SSH connection to $REMOTE_HOST ..."
-  if ! ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "echo ok" >/dev/null 2>&1; then
+  if ! _ssh_test; then
     die "Cannot reach $REMOTE_HOST via SSH. If using password auth, run 'rt setup-key' first."
   fi
 
   # Verify remote directory exists
-  if ! ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "test -d '$REMOTE_DIR'"; then
+  if ! _ssh "test -d '$REMOTE_DIR'"; then
     die "Remote directory does not exist: $REMOTE_DIR"
   fi
 
@@ -268,7 +267,7 @@ cmd_disconnect() {
 
   # Best-effort: kill remote background sessions for this profile
   info "[$RT_PROFILE] Cleaning up remote background jobs ..."
-  ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+  _ssh \
     "tmux list-sessions -F '#{session_name}' 2>/dev/null \
      | grep '^${RT_SESSION_PREFIX}' \
      | xargs -I{} tmux kill-session -t {} 2>/dev/null" \
@@ -324,7 +323,7 @@ cmd_exec() {
 
 _exec_sync() {
   local command="$1"
-  ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "cd '${REMOTE_DIR}' && ${command}"
+  _ssh "cd '${REMOTE_DIR}' && ${command}"
 }
 
 _exec_bg() {
@@ -332,7 +331,7 @@ _exec_bg() {
   local name="$2"
 
   # Check remote tmux
-  if ! ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "command -v tmux" >/dev/null 2>&1; then
+  if ! _ssh "command -v tmux" >/dev/null 2>&1; then
     die "tmux not found on remote server. Install tmux on $REMOTE_HOST for background execution."
   fi
 
@@ -345,11 +344,11 @@ _exec_bg() {
   fi
 
   # Create remote log directory
-  ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "mkdir -p ~/.rt_logs"
+  _ssh "mkdir -p ~/.rt_logs"
 
   # Start tmux session on remote
   local log_file="~/.rt_logs/${session}.log"
-  ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+  _ssh \
     "tmux new-session -d -s '${session}' -x 200 -y 50 \
       \"cd '${REMOTE_DIR}' && { ${command}; } 2>&1 | tee ${log_file}; echo \\\"EXIT_CODE=\\\$?\\\" >> ${log_file}\""
 
@@ -371,7 +370,7 @@ cmd_logs() {
   if [[ -z "$job_id" ]]; then
     _logs_list
   elif [[ "$follow" == true ]]; then
-    ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "tail -f ~/.rt_logs/${job_id}.log" 2>/dev/null \
+    _ssh "tail -f ~/.rt_logs/${job_id}.log" 2>/dev/null \
       || die "Log not found: $job_id"
   else
     _logs_show "$job_id"
@@ -383,8 +382,8 @@ _logs_list() {
   printf '\n'
 
   # Get running tmux sessions
-  local running ssh_err
-  running=$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+  local running
+  running=$(_ssh \
     "tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^${RT_SESSION_PREFIX}'" 2>&1) || {
     if [[ "$running" == *"Connection"* || "$running" == *"resolve"* || "$running" == *"No route"* ]]; then
       warn "Cannot reach $REMOTE_HOST"
@@ -395,7 +394,7 @@ _logs_list() {
 
   # Get all log files
   local logs
-  logs=$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+  logs=$(_ssh \
     "ls -1 ~/.rt_logs/${RT_SESSION_PREFIX}*.log 2>/dev/null | xargs -I{} basename {} .log" 2>/dev/null) || true
 
   if [[ -z "$running" && -z "$logs" ]]; then
@@ -413,7 +412,7 @@ _logs_list() {
     [[ -n "$s" ]] || continue
     if ! echo "$running" | grep -qx "$s"; then
       local exit_code
-      exit_code=$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+      exit_code=$(_ssh \
         "tail -1 ~/.rt_logs/${s}.log 2>/dev/null | grep -oP 'EXIT_CODE=\K[0-9]+'" 2>/dev/null) || exit_code="?"
       if [[ "$exit_code" == "0" ]]; then
         printf '  %-40s  [DONE]\n' "$s"
@@ -426,7 +425,7 @@ _logs_list() {
 
 _logs_show() {
   local job_id="$1"
-  ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "cat ~/.rt_logs/${job_id}.log" 2>/dev/null \
+  _ssh "cat ~/.rt_logs/${job_id}.log" 2>/dev/null \
     || die "Log not found: $job_id"
 }
 
@@ -450,10 +449,10 @@ cmd_status() {
     [[ -f "$RT_STATE_DIR/mount" ]]      && mount=$(cat "$RT_STATE_DIR/mount")
 
     local ssh_ok="reachable"
-    ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" "echo ok" >/dev/null 2>&1 || ssh_ok="UNREACHABLE"
+    _ssh_test || ssh_ok="UNREACHABLE"
 
     local bg_running=0
-    bg_running=$(ssh "${SSH_OPTS[@]}" "$REMOTE_HOST" \
+    bg_running=$(_ssh \
       "tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^${RT_SESSION_PREFIX}'" 2>/dev/null) || bg_running=0
 
     printf '  Profile:     %s\n' "$RT_PROFILE"
