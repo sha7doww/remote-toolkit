@@ -6,11 +6,21 @@ Config directory: `~/.config/remote-toolkit/`
 
 ## Prerequisites
 
-**Important:** The following tools require `sudo` to install. You (Claude Code) cannot do this.
+**Important:** The following tools require `sudo` (or admin rights) to install. You (Claude Code) cannot do this.
 
 Run `rt check` to verify dependencies. If anything is missing, **stop and tell the user** to run:
+
+Linux (Debian/Ubuntu):
 ```
 sudo apt install -y sshfs sshpass tmux
+```
+
+macOS (requires Homebrew):
+```
+brew install macfuse
+brew install gromgit/fuse/sshfs-mac
+brew install esolitos/ipa/sshpass
+brew install tmux
 ```
 After the user installs them, run `rt check` again to confirm.
 

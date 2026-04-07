@@ -17,7 +17,15 @@ Local Claude Code
 
 ```bash
 # 1. Install system dependencies (CC can't sudo — you need to do this)
+
+# Linux (Debian/Ubuntu)
 sudo apt install -y sshfs sshpass tmux
+
+# macOS (requires Homebrew)
+brew install macfuse
+brew install gromgit/fuse/sshfs-mac
+brew install esolitos/ipa/sshpass
+brew install tmux
 
 # 2. Clone and install
 git clone <repo-url>
@@ -58,7 +66,8 @@ Disconnecting only unmounts the filesystem. Config files are preserved — just 
 
 | Scenario | Action |
 |----------|--------|
-| CC reports missing dependencies | `sudo apt install -y sshfs sshpass tmux` |
+| CC reports missing dependencies (Linux) | `sudo apt install -y sshfs sshpass tmux` |
+| CC reports missing dependencies (macOS) | `brew install macfuse gromgit/fuse/sshfs-mac esolitos/ipa/sshpass tmux` |
 | First time connecting to a server | Tell CC the address, port, and password |
 | Mount problems | Tell CC to reconnect, or run `rt disconnect && rt connect` |
 
@@ -87,7 +96,8 @@ SSH_PORT=22                         # optional, default 22
 
 | Problem | Solution |
 |---------|----------|
-| CC says `sshfs: command not found` | `sudo apt install sshfs` |
+| CC says `sshfs: command not found` (Linux) | `sudo apt install sshfs` |
+| CC says `sshfs: command not found` (macOS) | `brew install macfuse && brew install gromgit/fuse/sshfs-mac` |
 | SSH connection failed | Check network: `ssh -p PORT user@host "echo ok"` |
 | File operations timeout/hang | Tell CC to reconnect, or `rt disconnect && rt connect` |
 | Unmount fails (device busy) | Close all processes accessing `~/remote/` and retry |

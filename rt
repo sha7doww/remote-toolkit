@@ -16,6 +16,30 @@ info()  { _color 32; printf ':: %s\n' "$*" >&2; _reset; }
 warn()  { _color 33; printf '!! %s\n' "$*" >&2; _reset; }
 die()   { _color 31; printf 'ERROR: %s\n' "$*" >&2; _reset; exit 1; }
 
+# ── Platform detection ────────────────────────────────────────────
+RT_OS="$(uname -s)"   # "Linux" or "Darwin"
+
+_install_hint() {
+  if [[ "$RT_OS" == "Darwin" ]]; then
+    case "$1" in
+      sshfs)   echo "brew install macfuse && brew install gromgit/fuse/sshfs-mac" ;;
+      sshpass) echo "brew install esolitos/ipa/sshpass" ;;
+      *)       echo "brew install $1" ;;
+    esac
+  else
+    echo "sudo apt install $1"
+  fi
+}
+
+_is_mountpoint() {
+  local mnt="$1"
+  if [[ "$RT_OS" == "Darwin" ]]; then
+    mount | grep -qF " on ${mnt} " 2>/dev/null
+  else
+    mountpoint -q "$mnt" 2>/dev/null
+  fi
+}
+
 # ── Profile-aware paths ───────────────────────────────────────────
 _init_profile() {
   if [[ "$RT_PROFILE" == "default" ]]; then
@@ -70,7 +94,7 @@ clear_state() {
 }
 
 is_mounted() {
-  [[ -n "${LOCAL_MOUNT:-}" ]] && mountpoint -q "$LOCAL_MOUNT" 2>/dev/null
+  [[ -n "${LOCAL_MOUNT:-}" ]] && _is_mountpoint "$LOCAL_MOUNT"
 }
 
 _ssh() {
@@ -93,8 +117,11 @@ cmd_check() {
     "tmux|tmux||"
     "sshfs|sshfs||"
     "sshpass|sshpass|needed for rt setup-key --password|"
-    "fusermount3||usually comes with sshfs/fuse3|fusermount"
   )
+  # fusermount is Linux-only (macOS uses umount)
+  if [[ "$RT_OS" != "Darwin" ]]; then
+    deps+=("fusermount3||usually comes with sshfs/fuse3|fusermount")
+  fi
 
   for entry in "${deps[@]}"; do
     IFS='|' read -r cmd pkg note alt <<< "$entry"
@@ -106,7 +133,7 @@ cmd_check() {
       local label="MISSING"
       [[ -n "$note" ]] && label="MISSING ($note)"
       warn "$cmd — $label"
-      [[ -n "$pkg" ]] && printf '  Install: sudo apt install %s\n' "$pkg"
+      [[ -n "$pkg" ]] && printf '  Install: %s\n' "$(_install_hint "$pkg")"
       ok=false
     fi
   done
@@ -173,7 +200,7 @@ cmd_setup_key() {
   if [[ -n "$password" ]]; then
     # Non-interactive: use sshpass
     command -v sshpass >/dev/null 2>&1 \
-      || die "sshpass not found. Ask the user to install: sudo apt install sshpass"
+      || die "sshpass not found. Ask the user to install: $(_install_hint sshpass)"
     SSHPASS="$password" sshpass -e ssh-copy-id \
       -o StrictHostKeyChecking=accept-new \
       -i "$key_file" -p "$SSH_PORT" "$REMOTE_HOST"
@@ -204,7 +231,7 @@ cmd_connect() {
 
   # Check sshfs is available
   command -v sshfs >/dev/null 2>&1 \
-    || die "sshfs not found. Ask the user to install: sudo apt install sshfs"
+    || die "sshfs not found. Ask the user to install: $(_install_hint sshfs)"
 
   # Test SSH connectivity
   info "[$RT_PROFILE] Testing SSH connection to $REMOTE_HOST ..."
@@ -231,9 +258,12 @@ cmd_connect() {
     -o cache_timeout=5
     -o attr_timeout=5
     -o entry_timeout=5
-    -o auto_cache
-    -o no_readahead
   )
+  if [[ "$RT_OS" == "Darwin" ]]; then
+    sshfs_opts+=(-o defer_permissions -o "volname=rt_${RT_PROFILE}")
+  else
+    sshfs_opts+=(-o auto_cache -o no_readahead)
+  fi
   if [[ -n "$SSH_KEY" ]]; then sshfs_opts+=(-o "IdentityFile=${SSH_KEY}"); fi
 
   if ! sshfs "${REMOTE_HOST}:${REMOTE_DIR}" "$LOCAL_MOUNT" "${sshfs_opts[@]}"; then
@@ -270,12 +300,21 @@ cmd_disconnect() {
 
   # Unmount
   info "[$RT_PROFILE] Unmounting $LOCAL_MOUNT ..."
-  if ! fusermount3 -u "$LOCAL_MOUNT" 2>/dev/null && ! fusermount -u "$LOCAL_MOUNT" 2>/dev/null; then
-    warn "Normal unmount failed, trying lazy unmount ..."
-    if ! fusermount3 -uz "$LOCAL_MOUNT" 2>/dev/null && ! fusermount -uz "$LOCAL_MOUNT" 2>/dev/null; then
-      die "Cannot unmount $LOCAL_MOUNT. Close any open files and try again."
+  if [[ "$RT_OS" == "Darwin" ]]; then
+    if ! umount "$LOCAL_MOUNT" 2>/dev/null; then
+      warn "Normal unmount failed, trying force unmount ..."
+      if ! diskutil unmount force "$LOCAL_MOUNT" 2>/dev/null; then
+        die "Cannot unmount $LOCAL_MOUNT. Close any open files and try again."
+      fi
     fi
-    warn "Lazy unmount scheduled. Mount will be removed when all files are closed."
+  else
+    if ! fusermount3 -u "$LOCAL_MOUNT" 2>/dev/null && ! fusermount -u "$LOCAL_MOUNT" 2>/dev/null; then
+      warn "Normal unmount failed, trying lazy unmount ..."
+      if ! fusermount3 -uz "$LOCAL_MOUNT" 2>/dev/null && ! fusermount -uz "$LOCAL_MOUNT" 2>/dev/null; then
+        die "Cannot unmount $LOCAL_MOUNT. Close any open files and try again."
+      fi
+      warn "Lazy unmount scheduled. Mount will be removed when all files are closed."
+    fi
   fi
 
   clear_state
@@ -408,7 +447,7 @@ _logs_list() {
     if ! echo "$running" | grep -qx "$s"; then
       local exit_code
       exit_code=$(_ssh \
-        "tail -1 ~/.rt_logs/${s}.log 2>/dev/null | grep -oP 'EXIT_CODE=\K[0-9]+'" 2>/dev/null) || exit_code="?"
+        "tail -1 ~/.rt_logs/${s}.log 2>/dev/null | sed -n 's/.*EXIT_CODE=\([0-9][0-9]*\).*/\1/p'" 2>/dev/null) || exit_code="?"
       if [[ "$exit_code" == "0" ]]; then
         printf '  %-40s  [DONE]\n' "$s"
       else
@@ -481,7 +520,7 @@ _status_all() {
       [[ -f "$pdir/remote_dir" ]] && rdir=$(cat "$pdir/remote_dir")
 
       local status="disconnected"
-      if [[ -n "$mount" ]] && mountpoint -q "$mount" 2>/dev/null; then
+      if [[ -n "$mount" ]] && _is_mountpoint "$mount"; then
         status="connected"
       fi
 
