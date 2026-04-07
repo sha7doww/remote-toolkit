@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # ── Paths (defaults, may be overridden by profile) ────────────────
-RT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RT_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RT_HOME="${RT_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/remote-toolkit}"
 RT_PROFILE="default"
 RT_CONF=""
 RT_STATE_DIR=""
@@ -18,18 +19,18 @@ die()   { _color 31; printf 'ERROR: %s\n' "$*" >&2; _reset; exit 1; }
 # ── Profile-aware paths ───────────────────────────────────────────
 _init_profile() {
   if [[ "$RT_PROFILE" == "default" ]]; then
-    RT_CONF="${RT_DIR}/rt.conf"
+    RT_CONF="${RT_HOME}/rt.conf"
   else
-    RT_CONF="${RT_DIR}/rt.conf.${RT_PROFILE}"
+    RT_CONF="${RT_HOME}/rt.conf.${RT_PROFILE}"
   fi
-  RT_STATE_DIR="${RT_DIR}/.rt/${RT_PROFILE}"
+  RT_STATE_DIR="${RT_HOME}/.rt/${RT_PROFILE}"
   RT_SESSION_PREFIX="rt_${RT_PROFILE}_bg_"
 }
 
 # ── Config ─────────────────────────────────────────────────────────
 load_config() {
   [[ -f "$RT_CONF" ]] || die "Config not found: $RT_CONF
-  Create it: cp rt.conf.example ${RT_CONF##*/}"
+  Run 'rt init' to create from template, or create manually in $RT_HOME/"
   # shellcheck source=/dev/null
   . "$RT_CONF"
   [[ -n "${REMOTE_HOST:-}" ]] || die "REMOTE_HOST not set in $RT_CONF"
@@ -118,6 +119,36 @@ cmd_check() {
     warn "Some dependencies are missing. Ask the user to run the install commands above."
   fi
   $ok
+}
+
+cmd_init() {
+  mkdir -p "$RT_HOME"
+
+  local has_config=false
+  for f in "$RT_HOME"/rt.conf "$RT_HOME"/rt.conf.*; do
+    [[ -f "$f" ]] && has_config=true && break
+  done
+
+  if [[ "$has_config" == false ]]; then
+    if [[ -f "$RT_SCRIPT_DIR/rt.conf.example" ]]; then
+      cp "$RT_SCRIPT_DIR/rt.conf.example" "$RT_HOME/rt.conf"
+      info "Created $RT_HOME/rt.conf from template."
+    else
+      cat > "$RT_HOME/rt.conf" <<'TMPL'
+REMOTE_HOST="user@example.com"
+REMOTE_DIR="/home/user/project"
+# SSH_PORT=22
+# SSH_KEY="$HOME/.ssh/id_ed25519"
+TMPL
+      info "Created $RT_HOME/rt.conf with defaults."
+    fi
+    info "Edit $RT_HOME/rt.conf with your server details."
+  else
+    info "Config already exists in $RT_HOME/"
+  fi
+
+  info "Config directory: $RT_HOME"
+  info "Next: edit config, then run 'rt connect'"
 }
 
 cmd_setup_key() {
@@ -435,7 +466,7 @@ cmd_status() {
 
 _status_all() {
   local found=false
-  local state_base="${RT_DIR}/.rt"
+  local state_base="${RT_HOME}/.rt"
 
   printf '\n'
   if [[ -d "$state_base" ]]; then
@@ -465,7 +496,7 @@ _status_all() {
 }
 
 cmd_help() {
-  cat <<'HELP'
+  cat <<HELP
 Remote Toolkit — Control remote servers from Claude Code
 
 USAGE:
@@ -478,6 +509,7 @@ GLOBAL FLAGS:
                         Mount point: ~/remote (default) or ~/remote/<NAME>
 
 COMMANDS:
+  init                 Initialize config directory and create default config
   check                Check local dependencies, report what's missing
   setup-key            Copy SSH key to remote (one-time)
   setup-key --password PASS
@@ -496,6 +528,10 @@ COMMANDS:
   help                 Show this help
 
 EXAMPLES:
+  # First time setup
+  rt init                              # Create config directory
+  # Edit $RT_HOME/rt.conf with your server details
+
   # Single server (default profile)
   rt setup-key --password 'mypass'
   rt connect
@@ -516,18 +552,21 @@ EXAMPLES:
   rt -p gpu1 disconnect    # Disconnect one
   rt -p gpu2 disconnect
 
-CONFIG FILES:
-  rt.conf            Default profile config
-  rt.conf.<NAME>     Named profile config (e.g., rt.conf.gpu1)
+ENVIRONMENT:
+  RT_HOME              Config & state directory (default: $RT_HOME)
+
+CONFIG FILES (in \$RT_HOME):
+  rt.conf              Default profile config
+  rt.conf.<NAME>       Named profile config (e.g., rt.conf.gpu1)
 
   Required variables:
-    REMOTE_HOST      user@hostname
-    REMOTE_DIR       /path/on/remote
+    REMOTE_HOST        user@hostname
+    REMOTE_DIR         /path/on/remote
 
   Optional variables:
-    LOCAL_MOUNT      local mount point (auto: ~/remote or ~/remote/<NAME>)
-    SSH_KEY          path to SSH key (default: agent)
-    SSH_PORT         SSH port (default: 22)
+    LOCAL_MOUNT        local mount point (auto: ~/remote or ~/remote/<NAME>)
+    SSH_KEY            path to SSH key (default: agent)
+    SSH_PORT           SSH port (default: 22)
 HELP
 }
 
@@ -548,6 +587,7 @@ main() {
   shift || true
 
   case "$subcmd" in
+    init)          cmd_init "$@" ;;
     check)         cmd_check "$@" ;;
     setup-key)     cmd_setup_key "$@" ;;
     connect)       cmd_connect "$@" ;;

@@ -2,6 +2,19 @@
 
 让本地 Claude Code 通过 SSHFS + SSH 操控远程服务器的轻量 Bash 工具包。支持多 profile 同时连接多台服务器。
 
+## 安装
+
+```bash
+git clone <repo-url> ~/Project/remote-toolkit
+cd ~/Project/remote-toolkit
+./install.sh
+```
+
+安装后：
+- `rt` 命令全局可用（symlink 到 `~/.local/bin/rt`）
+- 配置目录：`~/.config/remote-toolkit/`
+- Claude Code 集成：全局 `CLAUDE.md` + `/remote` 斜杠命令
+
 ## 原理
 
 ```
@@ -33,31 +46,30 @@ sudo apt install -y sshfs sshpass tmux
 ## 快速开始
 
 ```bash
-# 1. 检查依赖
-./rt check
+# 1. 安装（一次性）
+./install.sh
 
-# 2. 创建配置
-cp rt.conf.example rt.conf
-vim rt.conf    # 填入 REMOTE_HOST 和 REMOTE_DIR
+# 2. 编辑配置
+vim ~/.config/remote-toolkit/rt.conf    # 填入 REMOTE_HOST 和 REMOTE_DIR
 
 # 3. 推送 SSH 密钥（一次性，之后免密）
-./rt setup-key --password '你的密码'
+rt setup-key --password '你的密码'
 
 # 4. 连接
-./rt connect
+rt connect
 
 # 5. 操作远程文件
 ls ~/remote/
 
 # 6. 执行远程命令
-./rt exec "whoami"
+rt exec "whoami"
 
 # 7. 长任务（后台运行，断线不丢失）
-./rt exec --bg --name build "make all"
-./rt logs rt_default_bg_build
+rt exec --bg --name build "make all"
+rt logs rt_default_bg_build
 
 # 8. 断开
-./rt disconnect
+rt disconnect
 ```
 
 ## 多服务器 (Profile)
@@ -65,40 +77,40 @@ ls ~/remote/
 每个 profile 有独立的配置文件和挂载点，互不干扰。
 
 ```bash
-# 创建 profile 配置（文件名：rt.conf.<profile名>）
-cat > rt.conf.gpu1 << 'EOF'
+# 创建 profile 配置
+cat > ~/.config/remote-toolkit/rt.conf.gpu1 << 'EOF'
 REMOTE_HOST="root@gpu-server-1"
 REMOTE_DIR="/root/workspace"
 SSH_PORT=22
 EOF
 
-cat > rt.conf.gpu2 << 'EOF'
+cat > ~/.config/remote-toolkit/rt.conf.gpu2 << 'EOF'
 REMOTE_HOST="root@gpu-server-2"
 REMOTE_DIR="/root/workspace"
 SSH_PORT=11720
 EOF
 
 # 分别推送密钥
-./rt -p gpu1 setup-key --password 'pass1'
-./rt -p gpu2 setup-key --password 'pass2'
+rt -p gpu1 setup-key --password 'pass1'
+rt -p gpu2 setup-key --password 'pass2'
 
 # 同时连接两台
-./rt -p gpu1 connect    # 挂载到 ~/remote/gpu1/
-./rt -p gpu2 connect    # 挂载到 ~/remote/gpu2/
+rt -p gpu1 connect    # 挂载到 ~/remote/gpu1/
+rt -p gpu2 connect    # 挂载到 ~/remote/gpu2/
 
 # 分别操作
-./rt -p gpu1 exec "nvidia-smi"
-./rt -p gpu2 exec "nvidia-smi"
+rt -p gpu1 exec "nvidia-smi"
+rt -p gpu2 exec "nvidia-smi"
 
 # 查看所有连接
-./rt status --all
+rt status --all
 
 # 分别断开
-./rt -p gpu1 disconnect
-./rt -p gpu2 disconnect
+rt -p gpu1 disconnect
+rt -p gpu2 disconnect
 ```
 
-不带 `-p` 等同于 `-p default`，配置文件为 `rt.conf`，挂载点为 `~/remote/`。
+不带 `-p` 等同于 `-p default`，配置文件为 `~/.config/remote-toolkit/rt.conf`，挂载点为 `~/remote/`。
 
 ## 命令参考
 
@@ -122,6 +134,8 @@ EOF
 
 ## 配置文件
 
+配置目录：`~/.config/remote-toolkit/`（可通过 `RT_HOME` 环境变量覆盖）
+
 - 默认 profile：`rt.conf`
 - 命名 profile：`rt.conf.<name>`（如 `rt.conf.gpu1`）
 
@@ -135,15 +149,16 @@ EOF
 
 ## 与 Claude Code 配合使用
 
-1. 在 remote-toolkit 目录下启动 Claude Code
-2. CC 读取 `CLAUDE.md` 自动了解用法
-3. CC 可以：创建配置、推送密钥、连接、读写远程文件、执行远程命令
-4. CC 不能：安装系统依赖（需要你手动 `sudo apt install`）
+运行 `./install.sh` 后，CC 在**任意工作目录**都能使用 `rt`：
+- 全局 `~/.claude/CLAUDE.md` 让 CC 自动知道 `rt` 的存在和基本用法
+- 输入 `/remote` 可注入完整的操作指南（首次连接、排障等）
+- CC 可以：创建配置、推送密钥、连接、读写远程文件、执行远程命令
+- CC 不能：安装系统依赖（需要你手动 `sudo apt install`）
 
 典型对话：
 > 用户：帮我连上 root@192.168.1.100，密码是 xxx，改一下 /root/app/config.yaml
 >
-> CC：创建 rt.conf → setup-key → connect → 通过 ~/remote/ 直接编辑文件
+> CC：创建配置 → setup-key → connect → 通过 ~/remote/ 直接编辑文件
 
 ## 故障排查
 
@@ -152,6 +167,6 @@ EOF
 | `sshfs: command not found` | `sudo apt install sshfs` |
 | `sshpass: command not found` | `sudo apt install sshpass` |
 | SSH 连接失败 | 检查网络和密钥：`ssh -p PORT user@host "echo ok"` |
-| 挂载后文件操作超时 | `./rt disconnect && ./rt connect` 重连 |
+| 挂载后文件操作超时 | `rt disconnect && rt connect` 重连 |
 | 卸载失败 (device busy) | 关闭所有访问挂载点的进程后重试 |
 | 后台任务无输出 | 确认远程已装 tmux：`ssh user@host "tmux -V"` |
