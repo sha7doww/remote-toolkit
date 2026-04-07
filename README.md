@@ -6,10 +6,13 @@
 
 ```
 本地 Claude Code
-  ├── Read/Edit/Write  →  ~/remote/<profile>/  ← SSHFS →  远程服务器:/project
-  └── Bash: rt exec    →  SSH                  →          远程服务器 shell
-                                                            └── tmux (长任务)
+  ├── Read/Edit/Write  →  ~/remote/       ← SSHFS →  服务器A:/project
+  ├── Read/Edit/Write  →  ~/remote/gpu1/  ← SSHFS →  服务器B:/workspace
+  └── Bash: rt exec    →  SSH             →          远程 shell (+ tmux)
 ```
+
+- 默认 profile 挂载到 `~/remote/`
+- 命名 profile 挂载到 `~/remote/<name>/`
 
 ## 前置要求
 
@@ -17,17 +20,15 @@
 |------|------|------|
 | `ssh` | 远程连接 | `sudo apt install openssh-client` |
 | `sshfs` | 挂载远程文件系统 | `sudo apt install sshfs` |
-| `sshpass` | 自动推送 SSH 密钥 | `sudo apt install sshpass` |
+| `sshpass` | 非交互式推送 SSH 密钥 | `sudo apt install sshpass` |
 | `tmux` | 后台长任务 | `sudo apt install tmux` |
 
-一键安装所有依赖：
+一键安装：
 ```bash
 sudo apt install -y sshfs sshpass tmux
 ```
 
-运行 `./rt check` 检查依赖状态。
-
-> **注意：** Claude Code 无法执行 `sudo` 命令。如果 CC 提示依赖缺失，需要你手动安装。
+> **注意：** Claude Code 无法执行 `sudo`。如果 CC 提示依赖缺失，需要你手动安装。
 
 ## 快速开始
 
@@ -39,19 +40,19 @@ sudo apt install -y sshfs sshpass tmux
 cp rt.conf.example rt.conf
 vim rt.conf    # 填入 REMOTE_HOST 和 REMOTE_DIR
 
-# 3. 推送 SSH 密钥（一次性）
+# 3. 推送 SSH 密钥（一次性，之后免密）
 ./rt setup-key --password '你的密码'
 
 # 4. 连接
 ./rt connect
 
-# 5. 操作远程文件（直接在挂载点下读写）
+# 5. 操作远程文件
 ls ~/remote/
 
 # 6. 执行远程命令
 ./rt exec "whoami"
 
-# 7. 长任务
+# 7. 长任务（后台运行，断线不丢失）
 ./rt exec --bg --name build "make all"
 ./rt logs rt_default_bg_build
 
@@ -64,7 +65,7 @@ ls ~/remote/
 每个 profile 有独立的配置文件和挂载点，互不干扰。
 
 ```bash
-# 创建 profile 配置
+# 创建 profile 配置（文件名：rt.conf.<profile名>）
 cat > rt.conf.gpu1 << 'EOF'
 REMOTE_HOST="root@gpu-server-1"
 REMOTE_DIR="/root/workspace"
@@ -101,6 +102,8 @@ EOF
 
 ## 命令参考
 
+所有命令均可在前面加 `-p <profile>` 指定 profile。
+
 | 命令 | 说明 |
 |------|------|
 | `rt check` | 检查依赖是否齐全 |
@@ -117,9 +120,10 @@ EOF
 | `rt status --all` | 所有 profile 连接状态 |
 | `rt help` | 帮助信息 |
 
-所有命令均可在前面加 `-p <profile>` 指定 profile。
-
 ## 配置文件
+
+- 默认 profile：`rt.conf`
+- 命名 profile：`rt.conf.<name>`（如 `rt.conf.gpu1`）
 
 | 变量 | 必填 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -136,13 +140,18 @@ EOF
 3. CC 可以：创建配置、推送密钥、连接、读写远程文件、执行远程命令
 4. CC 不能：安装系统依赖（需要你手动 `sudo apt install`）
 
+典型对话：
+> 用户：帮我连上 root@192.168.1.100，密码是 xxx，改一下 /root/app/config.yaml
+>
+> CC：创建 rt.conf → setup-key → connect → 通过 ~/remote/ 直接编辑文件
+
 ## 故障排查
 
 | 问题 | 解决 |
 |------|------|
 | `sshfs: command not found` | `sudo apt install sshfs` |
 | `sshpass: command not found` | `sudo apt install sshpass` |
-| SSH 连接失败 | 检查网络、密钥：`ssh -p PORT user@host "echo ok"` |
-| 挂载后文件操作超时 | `rt disconnect && rt connect` 重连 |
+| SSH 连接失败 | 检查网络和密钥：`ssh -p PORT user@host "echo ok"` |
+| 挂载后文件操作超时 | `./rt disconnect && ./rt connect` 重连 |
 | 卸载失败 (device busy) | 关闭所有访问挂载点的进程后重试 |
 | 后台任务无输出 | 确认远程已装 tmux：`ssh user@host "tmux -V"` |

@@ -1,6 +1,8 @@
 # Remote Toolkit Configuration
-# Copy this file to rt.conf and edit:
-#   cp rt.conf.example rt.conf
+#
+# 默认 profile:  cp rt.conf.example rt.conf
+# 命名 profile:  cp rt.conf.example rt.conf.<name>
+#                 例如: cp rt.conf.example rt.conf.gpu1
 
 # REQUIRED: Remote host (user@hostname or SSH config alias)
 REMOTE_HOST="user@example.com"
@@ -8,7 +10,9 @@ REMOTE_HOST="user@example.com"
 # REQUIRED: Remote directory to mount
 REMOTE_DIR="/home/user/project"
 
-# Optional: Local mount point (default: ~/remote)
+# Optional: Local mount point
+#   default profile → ~/remote
+#   named profile   → ~/remote/<name>
 # LOCAL_MOUNT="$HOME/remote"
 
 # Optional: SSH key path (default: use SSH agent)
