@@ -1,8 +1,8 @@
 # Remote Toolkit Configuration
 #
-# 默认 profile:  cp rt.conf.example rt.conf
-# 命名 profile:  cp rt.conf.example rt.conf.<name>
-#                 例如: cp rt.conf.example rt.conf.gpu1
+# Default profile:  cp rt.conf.example rt.conf
+# Named profile:    cp rt.conf.example rt.conf.<name>
+#                   e.g., cp rt.conf.example rt.conf.gpu1
 
 # REQUIRED: Remote host (user@hostname or SSH config alias)
 REMOTE_HOST="user@example.com"

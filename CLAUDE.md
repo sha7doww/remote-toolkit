@@ -1,41 +1,41 @@
-# Remote Toolkit — 开发指南
+# Remote Toolkit — Developer Guide
 
-本文件面向**开发此工具的 CC**，不是使用指南。使用指南在 `cc/remote.md`。
+This file is for **CC developing this tool**, not for using it. The usage guide is in `cc/remote.md`.
 
-## 项目结构
+## Project Structure
 
 ```
-rt                    主脚本（Bash），所有功能入口
-rt.conf.example       配置模板
-install.sh            安装脚本：symlink、配置迁移、CC 集成
+rt                    Main script (Bash), all functionality
+rt.conf.example       Config template
+install.sh            Installer: symlink, config migration, CC integration
 cc/
-  claude-global.md    → 安装时写入 ~/.claude/CLAUDE.md 的内容（英文，~10 行）
-  remote.md           → 安装时复制到 ~/.claude/commands/remote.md（中文，完整操作指南）
-CLAUDE.md             本文件（开发指南）
-README.md             用户文档
+  claude-global.md    → Installed into ~/.claude/CLAUDE.md (English, ~10 lines)
+  remote.md           → Installed into ~/.claude/commands/remote.md (full guide)
+CLAUDE.md             This file (developer guide)
+README.md             User-facing documentation
 ```
 
-## rt 脚本架构
+## rt Script Architecture
 
-- **RT_HOME**：配置和状态的根目录，默认 `~/.config/remote-toolkit/`，可通过环境变量覆盖
-- **RT_SCRIPT_DIR**：脚本自身所在目录，仅用于 `init` 命令查找 `rt.conf.example`
-- **Profile 系统**：`-p <name>` 选择 profile，影响配置文件路径（`rt.conf.<name>`）、状态目录（`.rt/<name>/`）、挂载点（`~/remote/<name>/`）、tmux session 前缀
-- **Dispatch**：`main()` 解析全局 flag 后分发到 `cmd_*` 函数
+- **RT_HOME**: Root directory for config and state, defaults to `~/.config/remote-toolkit/`, overridable via env var
+- **RT_SCRIPT_DIR**: Script's own directory, only used by `init` command to find `rt.conf.example`
+- **Profile system**: `-p <name>` selects a profile, affecting config path (`rt.conf.<name>`), state dir (`.rt/<name>/`), mount point (`~/remote/<name>/`), and tmux session prefix
+- **Dispatch**: `main()` parses global flags then routes to `cmd_*` functions
 
-子命令：`init` `check` `setup-key` `connect` `disconnect` `exec` `logs` `status` `help`
+Subcommands: `init` `check` `setup-key` `connect` `disconnect` `exec` `logs` `status` `help`
 
-## CC 集成文件（cc/ 目录）
+## CC Integration Files (cc/ directory)
 
-这两个文件是安装到用户环境的源文件，`install.sh` 负责部署：
+These are source files installed into the user's environment by `install.sh`:
 
-- **`cc/claude-global.md`**：带 HTML marker 的片段，追加到 `~/.claude/CLAUDE.md`。保持精简（~10 行），因为每次 CC 启动都会加载。
-- **`cc/remote.md`**：`/remote` 斜杠命令的完整内容。只在用户主动调用时注入上下文。
+- **`cc/claude-global.md`**: HTML-marked section appended to `~/.claude/CLAUDE.md`. Keep it minimal (~10 lines) since it loads on every CC startup.
+- **`cc/remote.md`**: Full content of the `/remote` slash command. Only injected when the user explicitly invokes it.
 
-修改这两个文件后，重新运行 `./install.sh` 即可部署更新。
+After editing these files, re-run `./install.sh` to deploy updates.
 
-## 开发约定
+## Development Conventions
 
-- 修改 rt 脚本后用 `bash -n rt` 检查语法
-- 所有路径使用 `RT_HOME`，不要硬编码 `RT_DIR` 或脚本目录
-- 不要引入 Python/Node 等额外运行时依赖，保持纯 Bash
-- 配置文件格式是可 source 的 Bash 变量赋值
+- Run `bash -n rt` after modifying the rt script to check syntax
+- Use `RT_HOME` for all paths — never hardcode `RT_DIR` or the script directory
+- No Python/Node or other runtime dependencies — keep it pure Bash
+- Config file format is source-able Bash variable assignments

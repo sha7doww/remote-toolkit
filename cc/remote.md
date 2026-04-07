@@ -1,124 +1,124 @@
-# Remote Toolkit — Claude Code 完整指南
+# Remote Toolkit — Full Guide for Claude Code
 
-本指南通过 `rt` 命令管理远程服务器（SSHFS + SSH），支持多 profile 同时连接不同服务器。
+Manage remote servers via `rt` command (SSHFS + SSH). Supports multiple profiles for simultaneous connections.
 
-配置目录：`~/.config/remote-toolkit/`
+Config directory: `~/.config/remote-toolkit/`
 
-## 前置依赖
+## Prerequisites
 
-**重要：** 以下工具需要 `sudo` 安装，你（Claude Code）无法自动完成。
+**Important:** The following tools require `sudo` to install. You (Claude Code) cannot do this.
 
-运行 `rt check` 检查依赖状态。如果有缺失项，**停下来告知用户**执行：
+Run `rt check` to verify dependencies. If anything is missing, **stop and tell the user** to run:
 ```
 sudo apt install -y sshfs sshpass tmux
 ```
-用户安装完成后，再次运行 `rt check` 确认。
+After the user installs them, run `rt check` again to confirm.
 
-## 首次连接新服务器
+## First-Time Server Connection
 
-当用户提供服务器信息（如 `ssh user@host -p PORT`，密码 `xxx`）时，按以下步骤操作：
+When the user provides server info (e.g., `ssh user@host -p PORT`, password `xxx`), follow these steps:
 
-### 1. 检查依赖
+### 1. Check dependencies
 ```bash
 rt check
 ```
 
-### 2. 创建配置文件
+### 2. Create config file
 
-用 Write 工具创建配置。默认 profile 用 `rt.conf`，命名 profile 用 `rt.conf.<name>`。
+Use the Write tool to create a config. Default profile uses `rt.conf`, named profiles use `rt.conf.<name>`.
 
-默认 profile（单台服务器时使用）：
+Default profile (single server):
 ```
-文件路径: ~/.config/remote-toolkit/rt.conf
-内容:
+File path: ~/.config/remote-toolkit/rt.conf
+Content:
 REMOTE_HOST="user@host"
 REMOTE_DIR="/home/user/project"
 SSH_PORT=22
 ```
 
-命名 profile（多台服务器时使用）：
+Named profile (multiple servers):
 ```
-文件路径: ~/.config/remote-toolkit/rt.conf.gpu1
-内容:
+File path: ~/.config/remote-toolkit/rt.conf.gpu1
+Content:
 REMOTE_HOST="root@gpu-server"
 REMOTE_DIR="/root/workspace"
 SSH_PORT=22
 ```
 
-### 3. 推送 SSH 密钥（一次性）
+### 3. Push SSH key (one-time)
 ```bash
-rt setup-key --password '密码'
-rt -p gpu1 setup-key --password '密码'
+rt setup-key --password 'password'
+rt -p gpu1 setup-key --password 'password'
 ```
 
-### 4. 连接
+### 4. Connect
 ```bash
 rt connect
 rt -p gpu1 connect
 ```
 
-## 日常使用
+## Daily Usage
 
-### 连接管理
+### Connection Management
 
 ```bash
-rt status              # 当前 profile 状态
-rt status --all        # 所有 profile 状态
-rt connect             # 连接默认 profile
-rt -p gpu1 connect     # 连接命名 profile
-rt disconnect          # 断开
-rt -p gpu1 disconnect  # 断开指定 profile
+rt status              # Current profile status
+rt status --all        # All profiles status
+rt connect             # Connect default profile
+rt -p gpu1 connect     # Connect named profile
+rt disconnect          # Disconnect
+rt -p gpu1 disconnect  # Disconnect specific profile
 ```
 
-### 文件操作
+### File Operations
 
-远程文件挂载位置：
-- 默认 profile → `~/remote/`
-- 命名 profile → `~/remote/<name>/`（如 `~/remote/gpu1/`）
+Remote files are mounted at:
+- Default profile → `~/remote/`
+- Named profile → `~/remote/<name>/` (e.g., `~/remote/gpu1/`)
 
-直接使用 Read / Edit / Write 工具操作这些路径：
+Use Read / Edit / Write tools directly on these paths:
 - `Read ~/remote/src/main.py`
 - `Edit ~/remote/gpu1/train.py`
 
-改动通过 SSHFS 自动同步到远程。
+Changes sync to remote automatically via SSHFS.
 
-### 执行远程命令
+### Remote Command Execution
 
-短命令（< 30 秒）：
+Short commands (< 30 seconds):
 ```bash
 rt exec "pwd"
 rt -p gpu1 exec "nvidia-smi"
 ```
 
-长命令（构建、训练、服务）：
+Long commands (builds, training, services):
 ```bash
 rt exec --bg --name build "make all"
 rt -p gpu1 exec --bg --name train "python3 train.py --epochs 100"
 ```
 
-查看后台任务：
+Check background tasks:
 ```bash
-rt logs                              # 列出当前 profile 的后台任务
-rt -p gpu1 logs                      # 列出 gpu1 的后台任务
-rt -p gpu1 logs rt_gpu1_bg_train     # 查看具体输出
+rt logs                              # List background tasks for current profile
+rt -p gpu1 logs                      # List gpu1's background tasks
+rt -p gpu1 logs rt_gpu1_bg_train     # View specific output
 ```
 
-命令的工作目录是 REMOTE_DIR，与挂载目录对应，相对路径通用。
+The working directory for commands is REMOTE_DIR, which corresponds to the mount directory. Relative paths work across both.
 
-## 注意事项
+## Important Rules
 
-1. **禁止交互式命令** — 不要运行 vim、less、top、python REPL。用非交互替代（`python3 -c "..."`、`head`、`cat`）。
+1. **No interactive commands** — Do not run vim, less, top, or python REPL. Use non-interactive alternatives (`python3 -c "..."`, `head`, `cat`).
 
-2. **延迟** — SSHFS 有网络延迟。避免扫描大目录，优先读取特定文件。
+2. **Latency** — SSHFS has network latency. Avoid scanning large directories; read specific files instead.
 
-3. **大文件** — 不要通过挂载读取 >10MB 的文件。用 `rt exec "head -100 big.log"` 代替。
+3. **Large files** — Do not read files >10MB through the mount. Use `rt exec "head -100 big.log"` instead.
 
-4. **不要同时改同一文件** — 不要一边通过挂载编辑，一边通过 `rt exec` 写同一个文件。
+4. **No concurrent writes** — Do not edit a file via the mount while also writing to it via `rt exec`.
 
-5. **超过 30 秒的命令必须用 `--bg`** — 避免 SSH 超时杀死进程。
+5. **Commands over 30 seconds must use `--bg`** — Prevents SSH timeout from killing the process.
 
-6. **连接中断** — 如果文件操作报错，运行 `rt status` 检查，必要时 `rt disconnect && rt connect` 重连。
+6. **Connection issues** — If file operations fail, run `rt status` to check, then `rt disconnect && rt connect` to reconnect if needed.
 
-7. **依赖缺失** — 如果 `rt check` 或任何命令报 "not found"，**不要尝试 sudo 安装**，告知用户手动安装。
+7. **Missing dependencies** — If `rt check` or any command reports "not found", **do not attempt to sudo install**. Tell the user to install manually.
 
-8. **查看帮助** — 运行 `rt help` 可查看所有命令和用法。
+8. **Help** — Run `rt help` for all commands and usage.
