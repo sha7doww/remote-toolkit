@@ -95,7 +95,9 @@ info "  Command:  rt (via $BIN_DIR/rt)"
 info "  CC integration: $CLAUDE_DIR/CLAUDE.md + /remote"
 printf '\n'
 info "Next steps:"
-info "  1. Edit $RT_HOME/rt.conf with your server details"
+info "  1. Edit $RT_HOME/rt.conf with your server details (REMOTE_HOST, REMOTE_DIR)"
 info "  2. rt setup-key --password 'your-password'"
-info "  3. rt connect"
+info "  3. rt connect    # starts Mutagen sync"
+info ""
+info "For HPC/Slurm hosts, also set SLURM_ENABLED=1 in the profile config."
 printf '\n'

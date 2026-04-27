@@ -22,7 +22,18 @@ README.md             User-facing documentation
 - **Profile system**: `-p <name>` selects a profile, affecting config path (`rt.conf.<name>`), state dir (`.rt/<name>/`), mount point (`~/remote/<name>/`), and tmux session prefix
 - **Dispatch**: `main()` parses global flags then routes to `cmd_*` functions
 
-Subcommands: `init` `check` `setup-key` `connect` `disconnect` `exec` `logs` `status` `help`
+Subcommands: `init` `check` `setup-key` `connect` `disconnect` `exec` `logs` `status` `sync` `slurm` `help`
+
+## Mutagen Integration
+
+- `rt connect` ensures the Mutagen daemon is running (`mutagen daemon start`, idempotent), then creates a sync session named `rt-<profile>` with label `rt-profile=<profile>`.
+- All Mutagen queries (`_has_sync`, `_sync_status`, `_sync_flush`, `_sync_terminate`) use `--label-selector rt-profile=<p>` rather than session names — labels are robust across renames and let `_status_all` enumerate by label without mutating `RT_PROFILE`.
+- Mutagen URL form is `[user@]host:path` and reads SSH parameters from `~/.ssh/config`. For non-default `SSH_PORT` or `SSH_KEY`, the user must add a matching Host entry to ssh config; `rt connect` warns when this is needed.
+
+## Slurm Integration
+
+- Gated by per-profile `SLURM_ENABLED=1`. `cmd_slurm` calls `_slurm_require_enabled` first; non-Slurm hosts get a clear error.
+- `rt slurm submit` performs a mandatory `_sync_flush` before `sbatch` to prevent stale-code submissions, then parses sbatch output for the job ID and appends to `.rt/<profile>/slurm_jobs` (cap 50 entries).
 
 ## CC Integration Files (cc/ directory)
 

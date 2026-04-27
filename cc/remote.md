@@ -1,32 +1,33 @@
 # Remote Toolkit — Full Guide for Claude Code
 
-Manage remote servers via `rt` command (SSHFS + SSH). Supports multiple profiles for simultaneous connections.
+Drive remote servers via the `rt` command. Files sync via Mutagen; commands run via SSH/tmux; HPC clusters get optional Slurm subcommands.
 
 Config directory: `~/.config/remote-toolkit/`
 
 ## Prerequisites
 
-**Important:** The following tools require `sudo` (or admin rights) to install. You (Claude Code) cannot do this.
+**Important:** These tools require admin rights. You (Claude Code) cannot install them — ask the user.
 
-Run `rt check` to verify dependencies. If anything is missing, **stop and tell the user** to run:
+Run `rt check` to verify dependencies. If anything is missing, **stop and tell the user**:
 
 Linux (Debian/Ubuntu):
 ```
-sudo apt install -y sshfs sshpass tmux
+sudo apt install -y tmux sshpass
+# Mutagen: see https://mutagen.io/documentation/introduction/installation
 ```
 
 macOS (requires Homebrew):
 ```
-brew install macfuse
-brew install gromgit/fuse/sshfs-mac
-brew install esolitos/ipa/sshpass
+brew install mutagen-io/mutagen/mutagen
 brew install tmux
+brew install esolitos/ipa/sshpass
 ```
-After the user installs them, run `rt check` again to confirm.
+
+After install, run `rt check` again.
 
 ## First-Time Server Connection
 
-When the user provides server info (e.g., `ssh user@host -p PORT`, password `xxx`), follow these steps:
+When the user provides server info (e.g., `ssh user@host -p PORT`, password `xxx`):
 
 ### 1. Check dependencies
 ```bash
@@ -35,100 +36,121 @@ rt check
 
 ### 2. Create config file
 
-Use the Write tool to create a config at `~/.config/remote-toolkit/`. Default profile uses `rt.conf`, named profiles use `rt.conf.<name>` (e.g., `rt.conf.gpu1`).
+Use Write to create config at `~/.config/remote-toolkit/`. Default profile uses `rt.conf`; named profiles use `rt.conf.<name>`.
 
-Default profile (single server):
+Default profile:
 ```
-File path: ~/.config/remote-toolkit/rt.conf
-Content:
+File: ~/.config/remote-toolkit/rt.conf
 REMOTE_HOST="user@host"
 REMOTE_DIR="/home/user/project"
 SSH_PORT=22
 ```
 
-Named profile (multiple servers):
+Named profile (multiple servers / HPC):
 ```
-File path: ~/.config/remote-toolkit/rt.conf.gpu1
-Content:
-REMOTE_HOST="root@gpu-server"
-REMOTE_DIR="/root/workspace"
+File: ~/.config/remote-toolkit/rt.conf.hpc
+REMOTE_HOST="user@login.cluster"
+REMOTE_DIR="/home/user/project"
 SSH_PORT=22
+SLURM_ENABLED=1
+```
+
+For non-default SSH_PORT or SSH_KEY, **also add a Host entry to `~/.ssh/config`** so Mutagen finds the right SSH parameters (Mutagen reads ssh config, not rt.conf):
+```
+Host login.cluster
+    Port 2222
+    IdentityFile ~/.ssh/cluster_key
 ```
 
 ### 3. Push SSH key (one-time)
 ```bash
 rt setup-key --password 'password'
-rt -p gpu1 setup-key --password 'password'
+rt -p hpc setup-key --password 'password'
 ```
 
 ### 4. Connect
 ```bash
 rt connect
-rt -p gpu1 connect
+rt -p hpc connect
 ```
+
+`connect` starts the Mutagen daemon (if needed) and creates a sync session named `rt-<profile>`. Initial scan happens in the background; `rt status` shows progress.
 
 ## Daily Usage
 
 ### Connection Management
 
 ```bash
-rt status              # Current profile status
-rt status --all        # All profiles status
-rt connect             # Connect default profile
-rt -p gpu1 connect     # Connect named profile
-rt disconnect          # Disconnect
-rt -p gpu1 disconnect  # Disconnect specific profile
+rt status              # Sync + SSH state for current profile
+rt status --all        # All profiles
+rt connect             # Idempotent — flushes if already connected
+rt disconnect          # Terminates sync; preserves local files
 ```
 
 ### File Operations
 
-Remote files are mounted at:
-- Default profile → `~/remote/`
-- Named profile → `~/remote/<name>/` (e.g., `~/remote/gpu1/`)
+The local replica directory:
+- Default profile → `~/work/`
+- Named profile → `~/work/<name>/` (e.g., `~/work/hpc/`)
 
-Use Read / Edit / Write tools directly on these paths:
-- `Read ~/remote/src/main.py`
-- `Edit ~/remote/gpu1/train.py`
+These are **regular local directories**, not network mounts. Read / Edit / Write at full local-disk speed:
+- `Read ~/work/src/main.py`
+- `Edit ~/work/hpc/train.py`
 
-Changes sync to remote automatically via SSHFS.
+Mutagen syncs changes to and from the remote in the background (typically < 1s for small files). Use `rt sync flush` to force reconciliation; `rt sync status` for diagnostics.
 
 ### Remote Command Execution
 
-Short commands (< 30 seconds):
+Short commands (< 30 seconds) — auto-flushes sync first:
 ```bash
 rt exec "pwd"
-rt -p gpu1 exec "nvidia-smi"
+rt -p hpc exec "nvidia-smi"
+rt exec --no-flush "ls"           # skip flush for fast iteration
 ```
 
-Long commands (builds, training, services):
+Long commands (builds, training daemons, services):
 ```bash
 rt exec --bg --name build "make all"
-rt -p gpu1 exec --bg --name train "python3 train.py --epochs 100"
+rt -p hpc exec --bg --name train "python3 train.py"
 ```
 
 Check background tasks:
 ```bash
-rt logs                              # List background tasks for current profile
-rt -p gpu1 logs                      # List gpu1's background tasks
-rt -p gpu1 logs rt_gpu1_bg_train     # View specific output
+rt logs                              # List background jobs for current profile
+rt -p hpc logs rt_hpc_bg_train       # Show specific output
+rt -p hpc logs rt_hpc_bg_train -f    # Follow (tail -f)
 ```
 
-The working directory for commands is REMOTE_DIR, which corresponds to the mount directory. Relative paths work across both.
+The working directory for `rt exec` is REMOTE_DIR, which mirrors the local `~/work/<profile>/` replica.
+
+## Slurm (HPC) Workflows
+
+Available when the profile has `SLURM_ENABLED=1`. Sync flush is automatic before submit.
+
+```bash
+rt -p hpc slurm submit train.sbatch                       # cd && sbatch train.sbatch
+rt -p hpc slurm submit train.sbatch -- --time=04:00:00    # extra args after `--`
+rt -p hpc slurm queue                                      # squeue -u $USER
+rt -p hpc slurm queue --all                                # squeue (whole cluster)
+rt -p hpc slurm logs                                       # list recent submissions
+rt -p hpc slurm logs 12345                                 # cat slurm-12345.out
+rt -p hpc slurm logs 12345 -f                              # tail -f
+rt -p hpc slurm logs 12345 --err                           # show .err instead
+rt -p hpc slurm cancel 12345                               # scancel 12345
+```
+
+`rt` does not generate sbatch scripts — write your own `*.sbatch` in `~/work/hpc/` and submit by path.
 
 ## Important Rules
 
-1. **No interactive commands** — Do not run vim, less, top, or python REPL. Use non-interactive alternatives (`python3 -c "..."`, `head`, `cat`).
+1. **No interactive commands** — vim, less, top, python REPL won't work. Use non-interactive alternatives (`python3 -c "..."`, `head`, `cat`).
 
-2. **Latency** — SSHFS has network latency. Avoid scanning large directories; read specific files instead.
+2. **Long-running commands** — use `rt exec --bg` (any host) or `rt slurm submit` (Slurm hosts). SSH timeouts will kill foreground commands over a few minutes.
 
-3. **Large files** — Do not read files >10MB through the mount. Use `rt exec "head -100 big.log"` instead.
+3. **Sync timing** — Mutagen syncs in the background. `rt exec` auto-flushes before executing, so the remote sees the latest edits. If skipping flush (`--no-flush`), beware of stale code.
 
-4. **No concurrent writes** — Do not edit a file via the mount while also writing to it via `rt exec`.
+4. **Connection issues** — If `rt status` shows `sync=offline`, check network. `rt sync flush` to retry. `rt disconnect && rt connect` to recreate the session.
 
-5. **Commands over 30 seconds must use `--bg`** — Prevents SSH timeout from killing the process.
+5. **Missing dependencies** — If `rt check` reports "not found", **do not attempt to sudo install**. Tell the user to run the install commands.
 
-6. **Connection issues** — If file operations fail, run `rt status` to check, then `rt disconnect && rt connect` to reconnect if needed.
-
-7. **Missing dependencies** — If `rt check` or any command reports "not found", **do not attempt to sudo install**. Tell the user to install manually.
-
-8. **Help** — Run `rt help` for all commands and usage.
+6. **Help** — `rt help` for command reference.

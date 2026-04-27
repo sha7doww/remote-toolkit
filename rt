@@ -22,21 +22,15 @@ RT_OS="$(uname -s)"   # "Linux" or "Darwin"
 _install_hint() {
   if [[ "$RT_OS" == "Darwin" ]]; then
     case "$1" in
-      sshfs)   echo "brew install macfuse && brew install gromgit/fuse/sshfs-mac" ;;
+      mutagen) echo "brew install mutagen-io/mutagen/mutagen" ;;
       sshpass) echo "brew install esolitos/ipa/sshpass" ;;
       *)       echo "brew install $1" ;;
     esac
   else
-    echo "sudo apt install $1"
-  fi
-}
-
-_is_mountpoint() {
-  local mnt="$1"
-  if [[ "$RT_OS" == "Darwin" ]]; then
-    mount | grep -qF " on ${mnt} " 2>/dev/null
-  else
-    mountpoint -q "$mnt" 2>/dev/null
+    case "$1" in
+      mutagen) echo "see https://mutagen.io/documentation/introduction/installation" ;;
+      *)       echo "sudo apt install $1" ;;
+    esac
   fi
 }
 
@@ -51,6 +45,90 @@ _init_profile() {
   RT_SESSION_PREFIX="rt_${RT_PROFILE}_bg_"
 }
 
+# ── Mutagen helpers ────────────────────────────────────────────────
+_mutagen_check() {
+  command -v mutagen >/dev/null 2>&1 \
+    || die "mutagen not found. Ask the user to install: $(_install_hint mutagen)"
+}
+
+_mutagen_daemon_ensure() {
+  # Idempotent: returns success if already running.
+  mutagen daemon start >/dev/null 2>&1 || true
+}
+
+_sync_session_name() {
+  echo "rt-${RT_PROFILE}"
+}
+
+_has_sync() {
+  local p="${1:-$RT_PROFILE}"
+  mutagen sync list --label-selector "rt-profile=${p}" 2>/dev/null \
+    | grep -q '^Identifier:'
+}
+
+_sync_status() {
+  local p="${1:-$RT_PROFILE}"
+  local out
+  out=$(mutagen sync list --label-selector "rt-profile=${p}" 2>/dev/null) || { echo none; return; }
+  if ! echo "$out" | grep -q '^Identifier:'; then
+    echo none
+    return
+  fi
+  if echo "$out" | grep -q 'Status:.*Paused'; then
+    echo paused
+  elif echo "$out" | grep -q 'Connected: No'; then
+    echo offline
+  else
+    echo active
+  fi
+}
+
+_sync_flush() {
+  local p="${1:-$RT_PROFILE}"
+  mutagen sync flush --label-selector "rt-profile=${p}" >/dev/null 2>&1
+}
+
+_sync_terminate() {
+  local p="${1:-$RT_PROFILE}"
+  mutagen sync terminate --label-selector "rt-profile=${p}" >/dev/null 2>&1 || true
+}
+
+_sync_create() {
+  local session_name
+  session_name=$(_sync_session_name)
+  local mutagen_url="${REMOTE_HOST}:${REMOTE_DIR}"
+
+  local sync_mode="${MUTAGEN_SYNC_MODE:-two-way-resolved}"
+
+  local args=(
+    --name="${session_name}"
+    --label="rt-profile=${RT_PROFILE}"
+    --mode="${sync_mode}"
+  )
+
+  if [[ "${MUTAGEN_IGNORE_VCS:-1}" == "1" ]]; then
+    args+=(--ignore-vcs)
+  fi
+
+  local default_ignores=(
+    "__pycache__/" "*.pyc" ".venv/" "venv/" "node_modules/"
+    "wandb/" "outputs/" "checkpoints/" ".ipynb_checkpoints/"
+    ".DS_Store" "*.swp"
+  )
+  local pat
+  for pat in "${default_ignores[@]}"; do
+    args+=("--ignore=${pat}")
+  done
+
+  if [[ -n "${MUTAGEN_IGNORE+x}" ]]; then
+    for pat in "${MUTAGEN_IGNORE[@]}"; do
+      args+=("--ignore=${pat}")
+    done
+  fi
+
+  mutagen sync create "${args[@]}" "${LOCAL_DIR}" "${mutagen_url}"
+}
+
 # ── Config ─────────────────────────────────────────────────────────
 load_config() {
   [[ -f "$RT_CONF" ]] || die "Config not found: $RT_CONF
@@ -60,16 +138,18 @@ load_config() {
   [[ -n "${REMOTE_HOST:-}" ]] || die "REMOTE_HOST not set in $RT_CONF"
   [[ -n "${REMOTE_DIR:-}" ]]  || die "REMOTE_DIR not set in $RT_CONF"
 
-  # Default mount point: ~/remote for default profile, ~/remote/<name> for named
+  # Default local replica dir: ~/work for default profile, ~/work/<name> for named
   if [[ "$RT_PROFILE" == "default" ]]; then
-    LOCAL_MOUNT="${LOCAL_MOUNT:-$HOME/remote}"
+    LOCAL_DIR="${LOCAL_DIR:-$HOME/work}"
   else
-    LOCAL_MOUNT="${LOCAL_MOUNT:-$HOME/remote/${RT_PROFILE}}"
+    LOCAL_DIR="${LOCAL_DIR:-$HOME/work/${RT_PROFILE}}"
   fi
   SSH_PORT="${SSH_PORT:-22}"
   SSH_KEY="${SSH_KEY:-}"
+  SLURM_ENABLED="${SLURM_ENABLED:-0}"
+  SLURM_LOG_DIR="${SLURM_LOG_DIR:-$REMOTE_DIR}"
 
-  # Build shared SSH options array
+  # Build shared SSH options array (used by direct _ssh calls; Mutagen uses ~/.ssh/config)
   SSH_OPTS=(
     -o ConnectTimeout=10
     -o BatchMode=yes
@@ -83,18 +163,15 @@ load_config() {
 # ── State helpers ──────────────────────────────────────────────────
 save_state() {
   mkdir -p "$RT_STATE_DIR"
-  printf '%s' "$REMOTE_HOST"  > "$RT_STATE_DIR/host"
-  printf '%s' "$LOCAL_MOUNT"  > "$RT_STATE_DIR/mount"
-  printf '%s' "$REMOTE_DIR"   > "$RT_STATE_DIR/remote_dir"
-  printf '%s' "$RT_PROFILE"   > "$RT_STATE_DIR/profile"
+  printf '%s' "$REMOTE_HOST"           > "$RT_STATE_DIR/host"
+  printf '%s' "$LOCAL_DIR"             > "$RT_STATE_DIR/local_dir"
+  printf '%s' "$REMOTE_DIR"            > "$RT_STATE_DIR/remote_dir"
+  printf '%s' "$RT_PROFILE"            > "$RT_STATE_DIR/profile"
+  printf '%s' "$(_sync_session_name)"  > "$RT_STATE_DIR/sync_session"
 }
 
 clear_state() {
   rm -rf "$RT_STATE_DIR"
-}
-
-is_mounted() {
-  [[ -n "${LOCAL_MOUNT:-}" ]] && _is_mountpoint "$LOCAL_MOUNT"
 }
 
 _ssh() {
@@ -115,13 +192,9 @@ cmd_check() {
   local deps=(
     "ssh|ssh||"
     "tmux|tmux||"
-    "sshfs|sshfs||"
+    "mutagen|mutagen||"
     "sshpass|sshpass|needed for rt setup-key --password|"
   )
-  # fusermount is Linux-only (macOS uses umount)
-  if [[ "$RT_OS" != "Darwin" ]]; then
-    deps+=("fusermount3||usually comes with sshfs/fuse3|fusermount")
-  fi
 
   for entry in "${deps[@]}"; do
     IFS='|' read -r cmd pkg note alt <<< "$entry"
@@ -162,6 +235,12 @@ REMOTE_HOST="user@example.com"
 REMOTE_DIR="/home/user/project"
 # SSH_PORT=22
 # SSH_KEY="$HOME/.ssh/id_ed25519"
+# LOCAL_DIR="$HOME/work"
+# MUTAGEN_SYNC_MODE="two-way-resolved"
+# MUTAGEN_IGNORE_VCS=1
+# MUTAGEN_IGNORE=("data/")
+# SLURM_ENABLED=0
+# SLURM_LOG_DIR="$REMOTE_DIR"
 TMPL
       info "Created $RT_CONF with defaults."
     fi
@@ -221,17 +300,16 @@ cmd_setup_key() {
 
 cmd_connect() {
   load_config
+  _mutagen_check
+  _mutagen_daemon_ensure
 
-  # Idempotent: already mounted → just report
-  if is_mounted; then
-    info "[$RT_PROFILE] Already connected to $REMOTE_HOST"
+  # Idempotent: sync session already exists → just flush and exit
+  if _has_sync; then
+    info "[$RT_PROFILE] Already connected to $REMOTE_HOST (flushing pending changes)"
+    _sync_flush || warn "Sync flush had issues; check 'rt status' / 'mutagen sync list'."
     cmd_status
     return 0
   fi
-
-  # Check sshfs is available
-  command -v sshfs >/dev/null 2>&1 \
-    || die "sshfs not found. Ask the user to install: $(_install_hint sshfs)"
 
   # Test SSH connectivity
   info "[$RT_PROFILE] Testing SSH connection to $REMOTE_HOST ..."
@@ -244,110 +322,89 @@ cmd_connect() {
     die "Remote directory does not exist: $REMOTE_DIR"
   fi
 
-  # Create local mount point
-  mkdir -p "$LOCAL_MOUNT"
-
-  # Mount via SSHFS
-  info "[$RT_PROFILE] Mounting $REMOTE_HOST:$REMOTE_DIR → $LOCAL_MOUNT ..."
-  local sshfs_opts=(
-    -o "Port=${SSH_PORT}"
-    -o reconnect
-    -o ServerAliveInterval=30
-    -o ServerAliveCountMax=3
-    -o cache=yes
-    -o cache_timeout=5
-    -o attr_timeout=5
-    -o entry_timeout=5
-  )
-  if [[ "$RT_OS" == "Darwin" ]]; then
-    sshfs_opts+=(-o defer_permissions -o "volname=rt_${RT_PROFILE}")
-  else
-    sshfs_opts+=(-o auto_cache -o no_readahead)
-  fi
-  if [[ -n "$SSH_KEY" ]]; then sshfs_opts+=(-o "IdentityFile=${SSH_KEY}"); fi
-
-  if ! sshfs "${REMOTE_HOST}:${REMOTE_DIR}" "$LOCAL_MOUNT" "${sshfs_opts[@]}"; then
-    die "SSHFS mount failed. Check connection and permissions."
+  # Warn on non-default ssh params (Mutagen uses ~/.ssh/config, not SSH_OPTS)
+  if [[ "$SSH_PORT" != "22" ]] || [[ -n "$SSH_KEY" ]]; then
+    warn "Non-default SSH_PORT or SSH_KEY detected."
+    warn "Mutagen uses ~/.ssh/config for SSH parameters. Add an entry like:"
+    warn "  Host ${REMOTE_HOST#*@}"
+    [[ "$SSH_PORT" != "22" ]] && warn "    Port ${SSH_PORT}"
+    [[ -n "$SSH_KEY" ]]       && warn "    IdentityFile ${SSH_KEY}"
+    warn "Otherwise sync may fail with 'connection refused' or auth errors."
   fi
 
-  # Verify
-  if ! is_mounted; then
-    die "Mount point not active after sshfs. Something went wrong."
+  # Create local replica directory
+  mkdir -p "$LOCAL_DIR"
+
+  # Create Mutagen sync session
+  info "[$RT_PROFILE] Starting sync: $LOCAL_DIR ⇄ $REMOTE_HOST:$REMOTE_DIR ..."
+  if ! _sync_create; then
+    die "Mutagen sync create failed. Check 'mutagen sync list' for diagnostics."
   fi
 
   save_state
   info "[$RT_PROFILE] Connected!"
-  info "  Remote:  $REMOTE_HOST:$REMOTE_DIR"
-  info "  Local:   $LOCAL_MOUNT"
+  info "  Local:    $LOCAL_DIR (auto-syncs in background)"
+  info "  Remote:   $REMOTE_HOST:$REMOTE_DIR"
+  info "  Session:  $(_sync_session_name)"
+  info "  Status:   rt -p $RT_PROFILE status"
 }
 
 cmd_disconnect() {
   load_config
 
-  if ! is_mounted; then
-    info "[$RT_PROFILE] Not connected."
-    clear_state
-    return 0
+  # Best-effort: kill remote background sessions for this profile (only if SSH reachable)
+  if _ssh_test; then
+    info "[$RT_PROFILE] Cleaning up remote background jobs ..."
+    _ssh \
+      "tmux list-sessions -F '#{session_name}' 2>/dev/null \
+       | grep '^${RT_SESSION_PREFIX}' \
+       | xargs -I{} tmux kill-session -t {} 2>/dev/null" \
+      2>/dev/null || true
   fi
 
-  # Best-effort: kill remote background sessions for this profile
-  info "[$RT_PROFILE] Cleaning up remote background jobs ..."
-  _ssh \
-    "tmux list-sessions -F '#{session_name}' 2>/dev/null \
-     | grep '^${RT_SESSION_PREFIX}' \
-     | xargs -I{} tmux kill-session -t {} 2>/dev/null" \
-    2>/dev/null || true
-
-  # Unmount
-  info "[$RT_PROFILE] Unmounting $LOCAL_MOUNT ..."
-  if [[ "$RT_OS" == "Darwin" ]]; then
-    if ! umount "$LOCAL_MOUNT" 2>/dev/null; then
-      warn "Normal unmount failed, trying force unmount ..."
-      if ! diskutil unmount force "$LOCAL_MOUNT" 2>/dev/null; then
-        die "Cannot unmount $LOCAL_MOUNT. Close any open files and try again."
-      fi
-    fi
+  if _has_sync; then
+    info "[$RT_PROFILE] Terminating sync session $(_sync_session_name) ..."
+    _sync_terminate
   else
-    if ! fusermount3 -u "$LOCAL_MOUNT" 2>/dev/null && ! fusermount -u "$LOCAL_MOUNT" 2>/dev/null; then
-      warn "Normal unmount failed, trying lazy unmount ..."
-      if ! fusermount3 -uz "$LOCAL_MOUNT" 2>/dev/null && ! fusermount -uz "$LOCAL_MOUNT" 2>/dev/null; then
-        die "Cannot unmount $LOCAL_MOUNT. Close any open files and try again."
-      fi
-      warn "Lazy unmount scheduled. Mount will be removed when all files are closed."
-    fi
+    info "[$RT_PROFILE] No active sync session."
   fi
 
   clear_state
-  rmdir "$LOCAL_MOUNT" 2>/dev/null || true
-  info "[$RT_PROFILE] Disconnected."
+  info "[$RT_PROFILE] Disconnected. Local replica preserved at $LOCAL_DIR"
 }
 
 cmd_exec() {
   load_config
 
-  if ! is_mounted; then
-    die "[$RT_PROFILE] Not connected. Run 'rt connect' first."
-  fi
-
   # Parse flags
   local bg=false
   local name=""
+  local no_flush=false
   local cmd_args=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --bg)     bg=true; shift ;;
-      --name)   name="$2"; shift 2 ;;
-      --name=*) name="${1#--name=}"; shift ;;
-      --)       shift; cmd_args+=("$@"); break ;;
-      -*)       die "Unknown flag: $1" ;;
-      *)        cmd_args+=("$@"); break ;;
+      --bg)        bg=true; shift ;;
+      --name)      name="$2"; shift 2 ;;
+      --name=*)    name="${1#--name=}"; shift ;;
+      --no-flush)  no_flush=true; shift ;;
+      --)          shift; cmd_args+=("$@"); break ;;
+      -*)          die "Unknown flag: $1" ;;
+      *)           cmd_args+=("$@"); break ;;
     esac
   done
 
-  [[ ${#cmd_args[@]} -gt 0 ]] || die "Usage: rt exec [--bg] [--name NAME] <command>"
-  local command="${cmd_args[*]}"
+  [[ ${#cmd_args[@]} -gt 0 ]] || die "Usage: rt exec [--bg] [--name NAME] [--no-flush] <command>"
 
+  # Need SSH; sync state is independent
+  _ssh_test || die "[$RT_PROFILE] Cannot reach $REMOTE_HOST. Run 'rt connect' first."
+
+  # Auto-flush sync so the remote sees latest edits before exec
+  if [[ "$no_flush" == false ]] && _has_sync; then
+    _sync_flush || warn "Sync flush had issues; continuing anyway. Use --no-flush to suppress."
+  fi
+
+  local command="${cmd_args[*]}"
   if [[ "$bg" == true ]]; then
     _exec_bg "$command" "$name"
   else
@@ -393,9 +450,7 @@ _exec_bg() {
 cmd_logs() {
   load_config
 
-  if ! is_mounted; then
-    die "[$RT_PROFILE] Not connected. Run 'rt connect' first."
-  fi
+  _ssh_test || die "[$RT_PROFILE] Cannot reach $REMOTE_HOST. Run 'rt connect' first."
 
   local job_id="${1:-}"
   local follow=false
@@ -473,32 +528,38 @@ cmd_status() {
   load_config
 
   printf '\n'
-  if is_mounted; then
+  local sync_state
+  sync_state=$(_sync_status)
+
+  if [[ "$sync_state" != "none" ]]; then
     local host="${REMOTE_HOST}"
     local rdir="${REMOTE_DIR}"
-    local mount="${LOCAL_MOUNT}"
+    local local_dir="${LOCAL_DIR}"
 
     [[ -f "$RT_STATE_DIR/host" ]]       && host=$(cat "$RT_STATE_DIR/host")
     [[ -f "$RT_STATE_DIR/remote_dir" ]] && rdir=$(cat "$RT_STATE_DIR/remote_dir")
-    [[ -f "$RT_STATE_DIR/mount" ]]      && mount=$(cat "$RT_STATE_DIR/mount")
+    [[ -f "$RT_STATE_DIR/local_dir" ]]  && local_dir=$(cat "$RT_STATE_DIR/local_dir")
 
     local ssh_ok="reachable"
     _ssh_test || ssh_ok="UNREACHABLE"
 
     local bg_running=0
-    bg_running=$(_ssh \
-      "tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^${RT_SESSION_PREFIX}'" 2>/dev/null) || bg_running=0
+    if [[ "$ssh_ok" == "reachable" ]]; then
+      bg_running=$(_ssh \
+        "tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^${RT_SESSION_PREFIX}'" 2>/dev/null) || bg_running=0
+    fi
 
     printf '  Profile:     %s\n' "$RT_PROFILE"
-    printf '  Status:      connected\n'
+    printf '  Sync:        %s\n' "$sync_state"
+    printf '  SSH:         %s\n' "$ssh_ok"
     printf '  Remote host: %s\n' "$host"
     printf '  Remote dir:  %s\n' "$rdir"
-    printf '  Mount point: %s\n' "$mount"
-    printf '  SSH:         %s\n' "$ssh_ok"
+    printf '  Local dir:   %s\n' "$local_dir"
+    [[ "${SLURM_ENABLED:-0}" == "1" ]] && printf '  Slurm:       enabled\n'
     if [[ $bg_running -gt 0 ]]; then printf '  Background:  %d running\n' "$bg_running"; fi
   else
     printf '  Profile:     %s\n' "$RT_PROFILE"
-    printf '  Status:      disconnected\n'
+    printf '  Sync:        none\n'
   fi
   printf '\n'
 }
@@ -514,17 +575,15 @@ _status_all() {
       found=true
       local pname
       pname=$(basename "$pdir")
-      local host="" mount="" rdir=""
+      local host="" local_dir="" rdir=""
       [[ -f "$pdir/host" ]]       && host=$(cat "$pdir/host")
-      [[ -f "$pdir/mount" ]]      && mount=$(cat "$pdir/mount")
+      [[ -f "$pdir/local_dir" ]]  && local_dir=$(cat "$pdir/local_dir")
       [[ -f "$pdir/remote_dir" ]] && rdir=$(cat "$pdir/remote_dir")
 
-      local status="disconnected"
-      if [[ -n "$mount" ]] && _is_mountpoint "$mount"; then
-        status="connected"
-      fi
+      local sync_state
+      sync_state=$(_sync_status "$pname")
 
-      printf '  [%s] %s — %s:%s → %s\n' "$pname" "$status" "$host" "$rdir" "$mount"
+      printf '  [%s] sync=%s — %s:%s ⇄ %s\n' "$pname" "$sync_state" "$host" "$rdir" "$local_dir"
     done
   fi
 
@@ -534,9 +593,180 @@ _status_all() {
   printf '\n'
 }
 
+# ── Sync subcommand (Mutagen passthroughs) ────────────────────────
+cmd_sync() {
+  load_config
+  _mutagen_check
+
+  local sub="${1:-}"
+  shift || true
+
+  case "$sub" in
+    flush)
+      if ! _has_sync; then
+        die "[$RT_PROFILE] No active sync session. Run 'rt connect' first."
+      fi
+      if _sync_flush; then
+        info "[$RT_PROFILE] Sync flushed."
+      else
+        warn "[$RT_PROFILE] Flush had issues. Check 'rt sync status'."
+      fi
+      ;;
+    status)
+      info "[$RT_PROFILE] Sync state: $(_sync_status)"
+      mutagen sync list --label-selector "rt-profile=${RT_PROFILE}" 2>&1 || true
+      ;;
+    "")
+      die "Usage: rt sync <flush|status>"
+      ;;
+    *)
+      die "Unknown sync subcommand: $sub"
+      ;;
+  esac
+}
+
+# ── Slurm subcommand (opt-in via SLURM_ENABLED=1) ─────────────────
+cmd_slurm() {
+  load_config
+  _slurm_require_enabled
+
+  local sub="${1:-}"
+  shift || true
+
+  case "$sub" in
+    submit) _slurm_submit "$@" ;;
+    queue)  _slurm_queue  "$@" ;;
+    cancel) _slurm_cancel "$@" ;;
+    logs)   _slurm_logs   "$@" ;;
+    "")     die "Usage: rt slurm <submit|queue|cancel|logs> ..." ;;
+    *)      die "Unknown slurm subcommand: $sub" ;;
+  esac
+}
+
+_slurm_require_enabled() {
+  [[ "${SLURM_ENABLED:-0}" == "1" ]] \
+    || die "Slurm is not enabled for profile '${RT_PROFILE}'. Set SLURM_ENABLED=1 in $RT_CONF."
+}
+
+_slurm_submit() {
+  local script=""
+  local sbatch_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --) shift; sbatch_args+=("$@"); break ;;
+      -*) die "Use '-- ...' to pass flags to sbatch. Got: $1" ;;
+      *)  if [[ -z "$script" ]]; then script="$1"; else sbatch_args+=("$1"); fi; shift ;;
+    esac
+  done
+  [[ -n "$script" ]] || die "Usage: rt slurm submit <script> [-- sbatch_args...]"
+
+  _ssh_test || die "[$RT_PROFILE] Cannot reach $REMOTE_HOST."
+
+  # Mandatory flush — script must be on remote before sbatch
+  if _has_sync; then
+    info "[$RT_PROFILE] Flushing sync before submit ..."
+    _sync_flush || die "Sync flush failed; aborting submit to avoid stale code."
+  else
+    warn "[$RT_PROFILE] No active sync session. Submitting anyway — assuming script is already on remote."
+  fi
+
+  info "[$RT_PROFILE] sbatch ${sbatch_args[*]:-} ${script}"
+  local output
+  if ! output=$(_ssh "cd '${REMOTE_DIR}' && sbatch ${sbatch_args[*]:-} '${script}'" 2>&1); then
+    printf '%s\n' "$output" >&2
+    die "sbatch failed."
+  fi
+  printf '%s\n' "$output"
+
+  local jobid
+  jobid=$(echo "$output" | sed -n 's/.*Submitted batch job \([0-9][0-9]*\).*/\1/p')
+  if [[ -n "$jobid" ]]; then
+    mkdir -p "$RT_STATE_DIR"
+    {
+      [[ -f "$RT_STATE_DIR/slurm_jobs" ]] && cat "$RT_STATE_DIR/slurm_jobs"
+      printf '%s:%s:%s\n' "$jobid" "$(date +%s)" "$script"
+    } | tail -50 > "$RT_STATE_DIR/slurm_jobs.tmp"
+    mv "$RT_STATE_DIR/slurm_jobs.tmp" "$RT_STATE_DIR/slurm_jobs"
+    info "Job $jobid recorded. Logs: rt -p $RT_PROFILE slurm logs $jobid"
+  fi
+}
+
+_slurm_queue() {
+  _ssh_test || die "[$RT_PROFILE] Cannot reach $REMOTE_HOST."
+  local fmt='%.10i %.12P %.20j %.8T %.10M %R'
+  if [[ "${1:-}" == "--all" || "${1:-}" == "-a" ]]; then
+    _ssh "squeue --format='$fmt'"
+  else
+    _ssh "squeue -u \$USER --format='$fmt'"
+  fi
+}
+
+_slurm_cancel() {
+  [[ $# -gt 0 ]] || die "Usage: rt slurm cancel <jobid> [<jobid>...]"
+  _ssh_test || die "[$RT_PROFILE] Cannot reach $REMOTE_HOST."
+  _ssh "scancel $*"
+}
+
+_slurm_logs() {
+  local jobid=""
+  local follow=false
+  local err=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f|--follow) follow=true; shift ;;
+      --err)       err=true; shift ;;
+      -*)          die "Unknown flag: $1" ;;
+      *)           jobid="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$jobid" ]]; then
+    if [[ -f "$RT_STATE_DIR/slurm_jobs" ]]; then
+      info "[$RT_PROFILE] Recent submissions (newest first):"
+      printf '\n'
+      awk -F: '{a[NR]=$0} END{for(i=NR;i>=1 && i>NR-10;i--) print a[i]}' "$RT_STATE_DIR/slurm_jobs" \
+      | while IFS=: read -r id ts script; do
+          local when="?"
+          if [[ "$RT_OS" == "Darwin" ]]; then
+            when=$(date -r "$ts" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "?")
+          else
+            when=$(date -d "@$ts" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "?")
+          fi
+          printf '  %-12s  %s  %s\n' "$id" "$when" "$script"
+        done
+      printf '\n'
+    else
+      info "No submissions recorded for profile '$RT_PROFILE'. Try: rt slurm queue"
+    fi
+    return 0
+  fi
+
+  _ssh_test || die "[$RT_PROFILE] Cannot reach $REMOTE_HOST."
+
+  local ext=".out"
+  $err && ext=".err"
+  local primary="${SLURM_LOG_DIR}/slurm-${jobid}${ext}"
+  local fallback="${REMOTE_DIR}/slurm-${jobid}${ext}"
+  local path=""
+
+  if _ssh "test -f '${primary}'"; then
+    path="$primary"
+  elif [[ "$primary" != "$fallback" ]] && _ssh "test -f '${fallback}'"; then
+    path="$fallback"
+  else
+    die "Log not found: ${primary}$([[ "$primary" != "$fallback" ]] && echo " (also tried ${fallback})")"
+  fi
+
+  if $follow; then
+    _ssh "tail -f '${path}'"
+  else
+    _ssh "cat '${path}'"
+  fi
+}
+
 cmd_help() {
   cat <<HELP
-Remote Toolkit — Control remote servers from Claude Code
+Remote Toolkit — Drive remote servers from Claude Code
 
 USAGE:
   rt [--profile NAME] <command> [options]
@@ -545,67 +775,81 @@ USAGE:
 GLOBAL FLAGS:
   -p, --profile NAME   Select a profile (default: "default")
                         Config file: rt.conf (default) or rt.conf.<NAME>
-                        Mount point: ~/remote (default) or ~/remote/<NAME>
+                        Local replica: ~/work (default) or ~/work/<NAME>
 
 COMMANDS:
-  init                 Initialize config directory and create default config
+  init                 Create config directory and default config
   check                Check local dependencies, report what's missing
-  setup-key            Copy SSH key to remote (one-time)
+  setup-key            Copy SSH key to remote (one-time, password auth)
   setup-key --password PASS
                        Non-interactive key push (requires sshpass)
-  connect              Mount remote directory via SSHFS
-  disconnect           Unmount and clean up
-  exec <command>       Run a command on the remote server
-  exec --bg <command>  Run in background (tmux), survives disconnection
-  exec --bg --name <n> <command>
-                       Background with a custom job name
-  logs                 List all background jobs for this profile
+  connect              Start Mutagen sync; ensures daemon is running
+  disconnect           Terminate sync; preserves local replica files
+  exec <command>       Run a command on the remote (auto-flushes sync)
+  exec --no-flush <cmd>
+                       Skip sync flush (faster for fast iteration)
+  exec --bg [--name N] <cmd>
+                       Run in background (tmux), survives disconnection
+  logs                 List background jobs for this profile
   logs <job_id>        Show output of a background job
   logs <job_id> -f     Follow (tail -f) a background job's output
-  status               Show connection status for current profile
+  status               Show sync + SSH state for current profile
   status --all         Show all profiles
+  sync flush           Force sync to reconcile now
+  sync status          Detailed Mutagen sync state for this profile
+  slurm submit <script> [-- sbatch_args...]
+                       Flush sync, then sbatch (requires SLURM_ENABLED=1)
+  slurm queue [--all]  Show queue (default: filtered to remote \$USER)
+  slurm cancel <id>... scancel one or more job IDs
+  slurm logs           List recent submissions for this profile
+  slurm logs <id> [-f] [--err]
+                       Cat or tail slurm-<id>.out (--err for .err)
   help                 Show this help
 
 EXAMPLES:
-  # First time setup
-  rt init                              # Create config directory
-  # Edit $RT_HOME/rt.conf with your server details
-
-  # Single server (default profile)
-  rt setup-key --password 'mypass'
-  rt connect
+  # First-time setup
+  rt init                                # Create config skeleton
+  # Edit \$RT_HOME/rt.conf with REMOTE_HOST, REMOTE_DIR
+  rt setup-key --password 'mypass'       # Push SSH key
+  rt connect                             # Start sync
   rt exec "ls -la"
   rt disconnect
 
-  # Multiple servers with profiles
-  rt -p gpu1 setup-key --password 'pass1'
-  rt -p gpu1 connect
-  rt -p gpu1 exec "nvidia-smi"
+  # Multiple servers via profiles
+  rt -p hpc setup-key --password 'pass'
+  rt -p hpc connect
+  rt -p hpc exec "nvidia-smi"
+  rt status --all
 
-  rt -p gpu2 setup-key --password 'pass2'
-  rt -p gpu2 connect
-  rt -p gpu2 exec "nvidia-smi"
-
-  rt status --all          # See all connections
-
-  rt -p gpu1 disconnect    # Disconnect one
-  rt -p gpu2 disconnect
+  # HPC / Slurm workflow (set SLURM_ENABLED=1 in rt.conf.<profile>)
+  rt -p hpc slurm submit train.sbatch
+  rt -p hpc slurm queue
+  rt -p hpc slurm logs <jobid> -f
+  rt -p hpc slurm cancel <jobid>
 
 ENVIRONMENT:
   RT_HOME              Config & state directory (default: $RT_HOME)
 
 CONFIG FILES (in \$RT_HOME):
   rt.conf              Default profile config
-  rt.conf.<NAME>       Named profile config (e.g., rt.conf.gpu1)
+  rt.conf.<NAME>       Named profile config (e.g., rt.conf.hpc)
 
-  Required variables:
-    REMOTE_HOST        user@hostname
+  Required:
+    REMOTE_HOST        user@hostname (or ~/.ssh/config alias)
     REMOTE_DIR         /path/on/remote
 
-  Optional variables:
-    LOCAL_MOUNT        local mount point (auto: ~/remote or ~/remote/<NAME>)
-    SSH_KEY            path to SSH key (default: agent)
+  Optional:
+    LOCAL_DIR          local replica (default: ~/work or ~/work/<NAME>)
+    SSH_KEY            SSH key path (default: agent)
     SSH_PORT           SSH port (default: 22)
+    MUTAGEN_SYNC_MODE  default: two-way-resolved
+    MUTAGEN_IGNORE_VCS 1 = pass --ignore-vcs (default), 0 = sync .git
+    MUTAGEN_IGNORE     bash array of extra ignore patterns
+    SLURM_ENABLED      1 enables \`rt slurm *\` (default 0)
+    SLURM_LOG_DIR      where slurm-<id>.out lands (default: \$REMOTE_DIR)
+
+NOTE: For non-default SSH_PORT or SSH_KEY, also add a Host entry to
+~/.ssh/config so Mutagen sync uses the same parameters.
 HELP
 }
 
@@ -634,6 +878,8 @@ main() {
     exec)          cmd_exec "$@" ;;
     status)        cmd_status "$@" ;;
     logs)          cmd_logs "$@" ;;
+    sync)          cmd_sync "$@" ;;
+    slurm)         cmd_slurm "$@" ;;
     help|--help|-h) cmd_help ;;
     *)             die "Unknown command: $subcmd. Run 'rt help' for usage." ;;
   esac

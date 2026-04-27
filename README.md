@@ -1,16 +1,17 @@
 # Remote Toolkit
 
-Let Claude Code control remote servers from any working directory. Supports multiple simultaneous server connections.
+Let Claude Code drive remote servers from any working directory. Mutagen sync for files; SSH/tmux for commands; opt-in Slurm subcommands for HPC clusters.
 
 ## How It Works
 
-Remote directories are mounted locally via SSHFS so CC can use Read/Edit/Write directly on remote files. Commands are executed over SSH, with tmux keeping long-running tasks alive.
+Local replica directories sync to remote via Mutagen, so CC can use Read/Edit/Write at local-disk speed. Commands run over SSH, with tmux keeping long-running tasks alive. For HPC clusters, opt-in Slurm subcommands wrap `sbatch`/`squeue`/`scancel`.
 
 ```
 Local Claude Code
-  ├── Read/Edit/Write  →  ~/remote/       ← SSHFS →  ServerA:/project
-  ├── Read/Edit/Write  →  ~/remote/gpu1/  ← SSHFS →  ServerB:/workspace
-  └── rt exec          →  SSH + tmux      →          remote shell
+  ├── Read/Edit/Write  →  ~/work/        ⇄ Mutagen ⇄  loginA:/project
+  ├── Read/Edit/Write  →  ~/work/hpc/    ⇄ Mutagen ⇄  loginB:/workspace  ─┐
+  ├── rt exec          →  SSH + tmux     →  remote shell                  │ shared FS
+  └── rt slurm submit  →  flush; sbatch  →  Slurm ─────────────────────→  compute (H100/H20/...)
 ```
 
 ## Install
@@ -19,13 +20,13 @@ Local Claude Code
 # 1. Install system dependencies (CC can't sudo — you need to do this)
 
 # Linux (Debian/Ubuntu)
-sudo apt install -y sshfs sshpass tmux
+sudo apt install -y tmux sshpass
+# Plus Mutagen: https://mutagen.io/documentation/introduction/installation
 
 # macOS (requires Homebrew)
-brew install macfuse
-brew install gromgit/fuse/sshfs-mac
-brew install esolitos/ipa/sshpass
+brew install mutagen-io/mutagen/mutagen
 brew install tmux
+brew install esolitos/ipa/sshpass
 
 # 2. Clone and install
 git clone <repo-url>
@@ -50,28 +51,29 @@ CC handles everything: create config → push SSH key → connect → edit the f
 
 On first connection, CC copies your local SSH public key (`~/.ssh/id_ed25519.pub` or `~/.ssh/id_rsa.pub`) to the remote server's `~/.ssh/authorized_keys` using the password you provide. After that, all connections are passwordless. The password is only used once and is not stored.
 
-**Multiple servers:** Give each server a name, CC manages them as profiles.
+**Multiple servers:** Give each server a name; CC manages them as profiles.
 
-> **You:** Connect to this GPU server, call it gpu1: root@10.0.0.5 port 22, password xxx, working directory /root/workspace
+> **You:** Connect to this HPC login node, call it hpc: user@login.cluster, password xxx, working directory /home/user/project, this cluster uses Slurm
 
 Then refer to it by name:
 
-> **You:** Run `python train.py --epochs 100` on gpu1
+> **You:** Submit train.sbatch to the queue on hpc
 
-> **You:** Disconnect gpu1
+> **You:** Disconnect hpc
 
-Disconnecting only unmounts the filesystem. Config files are preserved — just say "connect gpu1" to reconnect.
+Disconnecting only terminates the sync session. Your local replica files at `~/work/<name>/` are preserved — say "connect hpc" to reconnect.
 
 ## Things You May Need to Do Manually
 
 | Scenario | Action |
 |----------|--------|
-| CC reports missing dependencies (Linux) | `sudo apt install -y sshfs sshpass tmux` |
-| CC reports missing dependencies (macOS) | `brew install macfuse gromgit/fuse/sshfs-mac esolitos/ipa/sshpass tmux` |
+| CC reports missing dependencies (Linux) | `sudo apt install -y tmux sshpass` + install Mutagen from mutagen.io |
+| CC reports missing dependencies (macOS) | `brew install mutagen-io/mutagen/mutagen tmux esolitos/ipa/sshpass` |
 | First time connecting to a server | Tell CC the address, port, and password |
-| Mount problems | Tell CC to reconnect, or run `rt disconnect && rt connect` |
+| Non-default SSH port / key | Add a `Host` entry to `~/.ssh/config` so Mutagen sees the same SSH params |
+| Sync stuck or out of sync | Tell CC to run `rt sync flush` or `rt disconnect && rt connect` |
 
-Everything else (config creation, SSH key setup, file editing, command execution, background task management) is handled by CC through the `rt` command.
+Everything else (config creation, SSH key setup, file editing, command execution, background task management, Slurm submission) is handled by CC through the `rt` command.
 
 ## Configuration
 
@@ -79,25 +81,45 @@ Config directory: `~/.config/remote-toolkit/`
 
 One config file per server:
 
-| File | Purpose | Mount point |
-|------|---------|-------------|
-| `rt.conf` | Default server | `~/remote/` |
-| `rt.conf.gpu1` | Named profile | `~/remote/gpu1/` |
-| `rt.conf.gpu2` | Named profile | `~/remote/gpu2/` |
+| File | Purpose | Local replica |
+|------|---------|---------------|
+| `rt.conf` | Default server | `~/work/` |
+| `rt.conf.hpc` | Named profile | `~/work/hpc/` |
+| `rt.conf.gpu2` | Named profile | `~/work/gpu2/` |
 
-Config contents (typically created by CC automatically):
+Required:
 ```bash
-REMOTE_HOST="root@192.168.1.100"   # required
-REMOTE_DIR="/root/workspace"        # required
-SSH_PORT=22                         # optional, default 22
+REMOTE_HOST="user@hostname"   # or ~/.ssh/config alias
+REMOTE_DIR="/home/user/project"
+```
+
+Optional (SSH):
+```bash
+SSH_PORT=22
+SSH_KEY="$HOME/.ssh/id_ed25519"
+```
+
+Optional (Mutagen):
+```bash
+LOCAL_DIR="$HOME/work"             # default: ~/work or ~/work/<profile>
+MUTAGEN_SYNC_MODE="two-way-resolved"
+MUTAGEN_IGNORE_VCS=1
+MUTAGEN_IGNORE=("data/" "*.bin")   # appended to defaults
+```
+
+Optional (Slurm — HPC only):
+```bash
+SLURM_ENABLED=1                    # enables `rt slurm *`
+SLURM_LOG_DIR="$REMOTE_DIR"        # where slurm-<id>.out lands
 ```
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| CC says `sshfs: command not found` (Linux) | `sudo apt install sshfs` |
-| CC says `sshfs: command not found` (macOS) | `brew install macfuse && brew install gromgit/fuse/sshfs-mac` |
+| `rt check` says `mutagen: command not found` | Install Mutagen (see Install section) |
 | SSH connection failed | Check network: `ssh -p PORT user@host "echo ok"` |
-| File operations timeout/hang | Tell CC to reconnect, or `rt disconnect && rt connect` |
-| Unmount fails (device busy) | Close all processes accessing `~/remote/` and retry |
+| `rt status` shows `sync=offline` | `rt sync flush` to retry; check network; verify `~/.ssh/config` matches `rt.conf` |
+| Mutagen connects but files don't sync | `rt sync status` for details; check `MUTAGEN_IGNORE` patterns |
+| Slurm subcommands say "not enabled" | Set `SLURM_ENABLED=1` in `rt.conf.<profile>` |
+| `rt slurm submit` ran old code | Sync may not have flushed; check `rt sync status` and re-run |
