@@ -62,21 +62,22 @@ _sync_session_name() {
 
 _has_sync() {
   local p="${1:-$RT_PROFILE}"
-  mutagen sync list --label-selector "rt-profile=${p}" 2>/dev/null \
-    | grep -q '^Identifier:'
+  local out
+  out=$(mutagen sync list --label-selector "rt-profile=${p}" 2>/dev/null) || true
+  grep -q '^Identifier:' <<< "$out"
 }
 
 _sync_status() {
   local p="${1:-$RT_PROFILE}"
   local out
   out=$(mutagen sync list --label-selector "rt-profile=${p}" 2>/dev/null) || { echo none; return; }
-  if ! echo "$out" | grep -q '^Identifier:'; then
+  if ! grep -q '^Identifier:' <<< "$out"; then
     echo none
     return
   fi
-  if echo "$out" | grep -q 'Status:.*Paused'; then
+  if grep -q 'Status:.*Paused' <<< "$out"; then
     echo paused
-  elif echo "$out" | grep -q 'Connected: No'; then
+  elif grep -q 'Connected: No' <<< "$out"; then
     echo offline
   else
     echo active
