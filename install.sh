@@ -68,11 +68,24 @@ MARKER_END="<!-- remote-toolkit end -->"
 RT_SECTION=$(cat "$SCRIPT_DIR/cc/claude-global.md")
 
 if [[ -f "$CLAUDE_DIR/CLAUDE.md" ]]; then
-  if grep -q "$MARKER_START" "$CLAUDE_DIR/CLAUDE.md"; then
-    # Atomic update: build new file in temp, then replace
+  if grep -qF "$MARKER_START" "$CLAUDE_DIR/CLAUDE.md"; then
+    # Replace in-place between markers (preserves any user-added headings/content
+    # surrounding the markers, e.g., a parent "# Tools" section).
+    # Pass section via file path (not -v) to avoid awk's "newline in string"
+    # warnings on multi-line values under BSD awk.
     tmpfile=$(mktemp)
-    sed "/$MARKER_START/,/$MARKER_END/d" "$CLAUDE_DIR/CLAUDE.md" > "$tmpfile"
-    printf '\n%s\n' "$RT_SECTION" >> "$tmpfile"
+    awk -v secfile="$SCRIPT_DIR/cc/claude-global.md" \
+        -v start="$MARKER_START" \
+        -v end="$MARKER_END" '
+      BEGIN {
+        while ((getline line < secfile) > 0) section = section line "\n"
+        sub(/\n$/, "", section)
+        close(secfile)
+      }
+      $0 == start { print section; in_block = 1; next }
+      $0 == end   { in_block = 0; next }
+      !in_block   { print }
+    ' "$CLAUDE_DIR/CLAUDE.md" > "$tmpfile"
     mv "$tmpfile" "$CLAUDE_DIR/CLAUDE.md"
   else
     printf '\n%s\n' "$RT_SECTION" >> "$CLAUDE_DIR/CLAUDE.md"
