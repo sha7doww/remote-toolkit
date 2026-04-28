@@ -123,3 +123,5 @@ SLURM_LOG_DIR="$REMOTE_DIR"        # where slurm-<id>.out lands
 | Mutagen connects but files don't sync | `rt sync status` for details; check `MUTAGEN_IGNORE` patterns |
 | Slurm subcommands say "not enabled" | Set `SLURM_ENABLED=1` in `rt.conf.<profile>` |
 | `rt slurm submit` ran old code | Sync may not have flushed; check `rt sync status` and re-run |
+| **macOS:** replica ends up inside `~/Work/` mixed with your projects | APFS is case-insensitive by default, so the `~/work/<profile>/` default resolves to `~/Work/<profile>/` if you have a `~/Work/` dir. Set `LOCAL_DIR="$HOME/Work/Remote/<profile>"` (or any other path) explicitly in `rt.conf.<profile>` to override. |
+| Mutagen halts with "one-sided root emptying" after you bulk-deleted files on one side | Safety feature: prevents accidental wipe via deletion propagation. Recover with `mutagen sync reset --label-selector=rt-profile=<profile>`, or `rm` the corresponding files on the other side too. |
