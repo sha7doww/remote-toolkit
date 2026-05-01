@@ -1,16 +1,18 @@
 # Remote Toolkit — Developer Guide
 
-This file is for **CC developing this tool**, not for using it. The usage guide is in `cc/remote.md`.
+This file is for **CC developing this tool**, not for using it. The usage guide is in `SKILL.md`.
 
 ## Project Structure
 
 ```
 rt                    Main script (Bash), all functionality
 rt.conf.example       Config template
-install.sh            Installer: symlink, config migration, CC integration
-cc/
-  claude-global.md    → Installed into ~/.claude/CLAUDE.md (English, ~10 lines)
-  remote.md           → Installed into ~/.claude/commands/remote.md (full guide)
+install.sh            Installer: symlink, config migration, CC SKILL install
+SKILL.md              Claude Code SKILL — frontmatter (name=remote, description) + full guide.
+                      install.sh symlinks the whole repo to ~/.claude/skills/remote/.
+commands/
+  remote.md           Slash-command shim. install.sh symlinks to ~/.claude/commands/remote.md.
+                      `/remote` invokes the SKILL.
 CLAUDE.md             This file (developer guide)
 README.md             User-facing documentation
 ```
@@ -35,14 +37,18 @@ Subcommands: `init` `check` `setup-key` `connect` `disconnect` `exec` `logs` `st
 - Gated by per-profile `SLURM_ENABLED=1`. `cmd_slurm` calls `_slurm_require_enabled` first; non-Slurm hosts get a clear error.
 - `rt slurm submit` performs a mandatory `_sync_flush` before `sbatch` to prevent stale-code submissions, then parses sbatch output for the job ID and appends to `.rt/<profile>/slurm_jobs` (cap 50 entries).
 
-## CC Integration Files (cc/ directory)
+## CC Integration: SKILL + slash command
 
-These are source files installed into the user's environment by `install.sh`:
+`install.sh` installs as a Claude Code SKILL, mirroring the codex-review pattern. There is no `~/.claude/CLAUDE.md` injection.
 
-- **`cc/claude-global.md`**: HTML-marked section appended to `~/.claude/CLAUDE.md`. Keep it minimal (~10 lines) since it loads on every CC startup.
-- **`cc/remote.md`**: Full content of the `/remote` slash command. Only injected when the user explicitly invokes it.
+- **`SKILL.md`** (repo root): frontmatter (`name: remote` + a "pushy" description that lists trigger phrases) + the full operational guide. install.sh symlinks the whole repo to `~/.claude/skills/remote/`. Loaded eagerly as metadata in CC's skill list; the body loads when the description matches the user's prompt or when `/remote` is invoked.
+- **`commands/remote.md`**: thin slash-command shim with frontmatter (`description`, `argument-hint`, `allowed-tools`). install.sh symlinks it to `~/.claude/commands/remote.md`. Typing `/remote` triggers the SKILL.
 
-After editing these files, re-run `./install.sh` to deploy updates.
+If symlinked (default `--symlink` install mode), edits to `SKILL.md` and `commands/remote.md` take effect immediately — no re-run of `install.sh` needed. With `--copy`, re-run install.sh after edits.
+
+`install.sh` also performs a one-shot migration from the old install form: it strips the `<!-- remote-toolkit start/end -->` block from `~/.claude/CLAUDE.md` and removes a stale regular-file `~/.claude/commands/remote.md` (left by the old `cp`-based install) before creating the new symlinks.
+
+Skill design follows the official Anthropic skill-creator standards (progressive disclosure, "pushy" description that lists trigger phrases, imperative writing style). Reference: `~/.claude/plugins/marketplaces/claude-plugins-official/plugins/skill-creator/skills/skill-creator/SKILL.md`.
 
 ## Development Conventions
 

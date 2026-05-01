@@ -1,5 +1,37 @@
 #!/usr/bin/env bash
+# Install Remote Toolkit:
+# - Symlinks the rt CLI to ~/.local/bin/
+# - Migrates configs to ~/.config/remote-toolkit/
+# - Installs as Claude Code SKILL: ~/.claude/skills/remote (the repo) +
+#   ~/.claude/commands/remote.md slash-command shim
+# Default: symlink (live updates via `git pull`).
+# `--copy`: copy contents (excluding .git); the original clone can be deleted,
+# but future updates require re-clone + re-run.
 set -euo pipefail
+
+MODE="symlink"
+case "${1:-}" in
+    "")        ;;
+    --symlink) MODE="symlink" ;;
+    --copy)    MODE="copy" ;;
+    -h|--help)
+        cat <<EOF
+Usage: $0 [--symlink | --copy]
+
+  --symlink (default)  Symlink ~/.claude/skills/remote and the slash command
+                       back to this repo. git pull picks up updates.
+  --copy               Copy the skill (excluding .git) into ~/.claude/skills/remote
+                       and the slash command into ~/.claude/commands/remote.md.
+                       The original clone can be deleted afterward; updates
+                       require re-clone + re-run.
+EOF
+        exit 0
+        ;;
+    *)
+        echo "Unknown argument: $1. Use --help." >&2
+        exit 1
+        ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RT_HOME="${RT_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/remote-toolkit}"
@@ -58,55 +90,87 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
   fi
 fi
 
-# ── 4. Claude Code integration ───────────────────────────────────
-mkdir -p "$CLAUDE_DIR"
-mkdir -p "$CLAUDE_DIR/commands"
-
-# 4a. Global CLAUDE.md — append/update remote-toolkit section
+# ── 4. Migrate from old install (CLAUDE.md fragment + slash file) ──
 MARKER_START="<!-- remote-toolkit start -->"
 MARKER_END="<!-- remote-toolkit end -->"
-RT_SECTION=$(cat "$SCRIPT_DIR/cc/claude-global.md")
 
-if [[ -f "$CLAUDE_DIR/CLAUDE.md" ]]; then
-  if grep -qF "$MARKER_START" "$CLAUDE_DIR/CLAUDE.md"; then
-    # Replace in-place between markers (preserves any user-added headings/content
-    # surrounding the markers, e.g., a parent "# Tools" section).
-    # Pass section via file path (not -v) to avoid awk's "newline in string"
-    # warnings on multi-line values under BSD awk.
-    tmpfile=$(mktemp)
-    awk -v secfile="$SCRIPT_DIR/cc/claude-global.md" \
-        -v start="$MARKER_START" \
-        -v end="$MARKER_END" '
-      BEGIN {
-        while ((getline line < secfile) > 0) section = section line "\n"
-        sub(/\n$/, "", section)
-        close(secfile)
-      }
-      $0 == start { print section; in_block = 1; next }
-      $0 == end   { in_block = 0; next }
-      !in_block   { print }
-    ' "$CLAUDE_DIR/CLAUDE.md" > "$tmpfile"
-    mv "$tmpfile" "$CLAUDE_DIR/CLAUDE.md"
-  else
-    printf '\n%s\n' "$RT_SECTION" >> "$CLAUDE_DIR/CLAUDE.md"
-  fi
-  info "Updated $CLAUDE_DIR/CLAUDE.md (remote-toolkit section)"
-else
-  printf '%s\n' "$RT_SECTION" > "$CLAUDE_DIR/CLAUDE.md"
-  info "Created $CLAUDE_DIR/CLAUDE.md"
+if [[ -f "$CLAUDE_DIR/CLAUDE.md" ]] && grep -qF "$MARKER_START" "$CLAUDE_DIR/CLAUDE.md"; then
+  tmpfile=$(mktemp)
+  awk -v start="$MARKER_START" -v end="$MARKER_END" '
+    $0 == start { in_block = 1; next }
+    $0 == end   { in_block = 0; next }
+    !in_block   { print }
+  ' "$CLAUDE_DIR/CLAUDE.md" > "$tmpfile"
+  # Collapse runs of multiple blank lines that the removal may have produced.
+  awk 'BEGIN{blank=0} /^$/{blank++; if (blank<=1) print; next} {blank=0; print}' \
+    "$tmpfile" > "$tmpfile.2"
+  mv "$tmpfile.2" "$CLAUDE_DIR/CLAUDE.md"
+  rm -f "$tmpfile"
+  info "Removed old <!-- remote-toolkit --> block from $CLAUDE_DIR/CLAUDE.md"
 fi
 
-# 4b. Slash command /remote
-cp "$SCRIPT_DIR/cc/remote.md" "$CLAUDE_DIR/commands/remote.md"
-info "Installed $CLAUDE_DIR/commands/remote.md (/remote slash command)"
+# Old install put a regular file at ~/.claude/commands/remote.md; remove it so
+# we can install our symlink/copy in step 5. Leave symlinks alone — those are
+# either ours (idempotent re-run) or the user's intentional override.
+if [[ -f "$CLAUDE_DIR/commands/remote.md" && ! -L "$CLAUDE_DIR/commands/remote.md" ]]; then
+  rm "$CLAUDE_DIR/commands/remote.md"
+  info "Removed old slash-command file $CLAUDE_DIR/commands/remote.md"
+fi
 
-# ── 5. Summary ────────────────────────────────────────────────────
+# ── 5. Install as Claude Code SKILL + slash command ──────────────
+mkdir -p "$CLAUDE_DIR/skills" "$CLAUDE_DIR/commands"
+
+SKILL_TARGET="$CLAUDE_DIR/skills/remote"
+COMMAND_SRC="$SCRIPT_DIR/commands/remote.md"
+COMMAND_TARGET="$CLAUDE_DIR/commands/remote.md"
+
+# install_target <src> <target> <mode> <label>
+# Idempotent: skip if symlink already points at intended source; refuse
+# to overwrite anything else (the user has to remove it manually).
+install_target() {
+  local src="$1"
+  local target="$2"
+  local mode="$3"
+  local label="$4"
+
+  if [[ -L "$target" || -e "$target" ]]; then
+    if [[ -L "$target" && "$(readlink "$target")" == "$src" && "$mode" == "symlink" ]]; then
+      info "$label symlink already in place: $target -> $src"
+      return 0
+    fi
+    warn "Refusing to overwrite existing $target. Remove it manually if intended."
+    exit 1
+  fi
+
+  if [[ "$mode" == "symlink" ]]; then
+    ln -s "$src" "$target"
+    info "Linked $label: $target -> $src"
+  else
+    if [[ -d "$src" ]]; then
+      rsync -a --exclude='.git' "$src/" "$target/"
+    else
+      cp "$src" "$target"
+    fi
+    info "Copied $label: $src -> $target"
+  fi
+}
+
+install_target "$SCRIPT_DIR"  "$SKILL_TARGET"   "$MODE" "skill"
+install_target "$COMMAND_SRC" "$COMMAND_TARGET" "$MODE" "/remote slash command"
+
+# ── 6. Summary ────────────────────────────────────────────────────
 printf '\n'
 info "Installation complete!"
 info "  Config:   $RT_HOME/"
 info "  Command:  rt (via $BIN_DIR/rt)"
-info "  CC integration: $CLAUDE_DIR/CLAUDE.md + /remote"
+info "  CC integration: SKILL at $SKILL_TARGET + /remote slash command"
 printf '\n'
+
+if [[ "$MODE" == "copy" ]]; then
+  info "Future updates: rm -rf $SKILL_TARGET $COMMAND_TARGET, then re-clone and re-run 'bash install.sh --copy'."
+  printf '\n'
+fi
+
 info "Next steps:"
 info "  1. Edit $RT_HOME/rt.conf with your server details (REMOTE_HOST, REMOTE_DIR)"
 info "  2. rt setup-key --password 'your-password'"

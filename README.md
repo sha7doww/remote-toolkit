@@ -38,8 +38,12 @@ cd remote-toolkit
 - Symlinks `~/.local/bin/rt` → makes the `rt` command available globally
 - Adds `~/.local/bin` to PATH in `~/.bashrc` (or `~/.zshrc`) if not already present
 - Creates config directory `~/.config/remote-toolkit/`, migrates existing configs
-- Writes to `~/.claude/CLAUDE.md` → CC automatically knows about `rt` in any workspace
-- Writes to `~/.claude/commands/remote.md` → type `/remote` for CC to get the full guide
+- Symlinks the repo to `~/.claude/skills/remote/` → installs as a Claude Code SKILL. CC discovers it from the skill list and triggers it whenever the user mentions a remote server, SSH, Slurm, etc.
+- Symlinks `commands/remote.md` to `~/.claude/commands/remote.md` → typing `/remote` invokes the SKILL explicitly.
+
+Pass `--copy` instead of the default `--symlink` if you want the install to copy files (so the original clone can be deleted afterward).
+
+Re-running `install.sh` is idempotent. If you previously installed an older version that injected a fragment into `~/.claude/CLAUDE.md`, the installer removes the `<!-- remote-toolkit -->` block automatically.
 
 ## Usage
 
